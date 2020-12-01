@@ -116,14 +116,6 @@ def get_authors(root: str, filename: str):
             authors[match.group(2)] = int(match.group(1))
     return authors
 
-    # blame_lines = _run_cmd(root, ['git', 'blame', filename]).split('\n')
-    # authors = defaultdict(int)
-    # for line in blame_lines:
-    #     if line:
-    #         match = re.match(r'.*\((\w.*\w)\s+\d{4}-\d{2}-\d{2}.*', line)
-    #         authors[match.group(1)] += 1
-    # return authors
-
 
 def get_main_authors(root: str, filename: str, max_authors: int = 3):
     authors = get_authors(root=root, filename=filename)
