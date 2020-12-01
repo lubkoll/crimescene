@@ -128,12 +128,13 @@ def get_authors(root: str, filename: str):
 def get_main_authors(root: str, filename: str, max_authors: int = 3):
     authors = get_authors(root=root, filename=filename)
     valid = sorted(authors.values(), reverse=True)
+    n_authors = len(valid)
     if len(valid) > max_authors:
         valid = valid[:max_authors]
     to_remove = [author for author in authors if authors[author] not in valid]
     for author in to_remove:
         authors.pop(author)
-    return authors
+    return authors, n_authors
 
 
 def add_repo_main_authors(root: str, stats, max_authors: int = 3):

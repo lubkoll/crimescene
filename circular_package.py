@@ -66,8 +66,8 @@ def get_main_author(module, stats):
         return ''
     main_author = ''
     max_revs = 0
-    for author in stats[module]['authors']:
-        revs = stats[module]['authors'][author]
+    for author in stats[module]['authors'][0]:
+        revs = stats[module]['authors'][0][author]
         if revs > max_revs:
             max_revs = revs
             main_author = author

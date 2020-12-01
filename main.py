@@ -22,6 +22,7 @@ from process_git_log import get_first_commit_date, get_first_commit_sha, get_las
 
 HOME = str(Path.home())
 PROJECT = 'Spacy'
+PROJECT_STOPWORDS = set()
 STATS_PATH = f'{HOME}/.stats/{PROJECT}'
 PREFIX = f'/home/lars/projects/{PROJECT}/'
 CONTROL_WIDTH = 420
@@ -121,7 +122,8 @@ def generate_wordcloud(root: str, end: datetime, period: timedelta):
     text = read_commit_messages(root=root,
                                 start=(end - period).strftime(DATE_FORMAT),
                                 end=end_str)
-    wordcloud = WordCloud(stopwords=STOPWORDS, background_color='white')
+    wordcloud = WordCloud(stopwords=STOPWORDS | PROJECT_STOPWORDS,
+                          background_color='white')
     wordcloud.generate(text)
     wordcloud.to_file(wordcloud_file(end=end_str, period=period))
 
@@ -362,14 +364,15 @@ class App:
         locs = get_loc(root=PREFIX, before=period_end)
         add_loc(self.get_stats(), locs)
         t4 = time.time()
-        t5 = time.time()
         add_complexity_analysis(root=PREFIX,
                                 end=period_end,
                                 stats=self.get_stats())
-        self.update_summary()
         #        self.summary.text = f'Summary:</br>#files: {summary["#files"]}</br>#changed: {summary["#changed"]}</br>#revisions: {summary["#revisions"]}</br>#authors: {summary["#authors"]}'
-        t6 = time.time()
+
+        t5 = time.time()
         add_repo_main_authors(root=PREFIX, stats=self.get_stats())
+        t6 = time.time()
+        self.update_summary()
         t7 = time.time()
         print(f'{t1-t0}, {t2-t1}, {t3-t2}, {t4-t3}, {t5-t4}, {t6-t5}, {t7-t6}')
         self.db.store_stats(project_name=PROJECT,
@@ -453,7 +456,11 @@ class App:
             soc=[data['soc'] for data in self.get_stats().values()],
             color=get_colors(color_data),
             authors=[
-                ', '.join(self.get_stats()[name]['authors'].keys())
+                ', '.join(self.get_stats()[name]['authors'][0].keys())
+                for name in self.get_stats()
+            ],
+            n_authors=[
+                self.get_stats()[name]['authors'][1]
                 for name in self.get_stats()
             ])
 
@@ -470,7 +477,7 @@ class App:
                       ('mean_complexity', '@mean_complexity'),
                       ('complexity_sd', '@complexity_sd'),
                       ('complexity_max', '@complexity_max'), ('SOC', '@soc'),
-                      ('authors', '@authors')],
+                      ('authors', '@authors'), ('#authors', '@n_authors')],
             x_axis_label=x_title,
             y_axis_label=y_title,
             y_axis_type='log' if y_title == 'revisions' else 'linear',
@@ -580,7 +587,7 @@ class App:
         for name, n_coupled in data.items():
             if name == 'count':
                 continue
-            if n_coupled > 2 and n_coupled/n_revisions > 0.2:
+            if n_coupled > 2 and n_coupled / n_revisions > 0.2:
                 coupled.append((name, n_coupled))
         coupled = sorted(coupled, key=lambda x: x[1], reverse=True)
         for name, n_coupled in coupled:
