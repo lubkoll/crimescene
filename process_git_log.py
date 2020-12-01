@@ -81,27 +81,29 @@ def get_revisions(git_log: str) -> Dict[str, int]:
                 names_in_commit = []
                 continue
 
-            def add_name(name):
-                revisions[name]['revisions'] += 1
-                names_in_commit.append(name)
-
             match = re.match(r'[0-9]+\s+[0-9]+\s+(\S+.*)', line)
             if match:
                 name = match.group(1)
 
-                mapping_match = re.match(r'(.*)(\{\S+\s*=>\s*\S+\})(.*)', name)
+                mapping_match = re.match(r'.*(\{\S*\s*=>\s*\S*\})(.*)', name)
                 if mapping_match:
-                    mapping = mapping_match.group(2)
-                    rename_match = re.match(r'\{(\S+)\s*=>\s*(\S+)\}', mapping)
-                    old_name = name.replace(mapping, rename_match.group(1))
-                    new_name = name.replace(mapping, rename_match.group(2))
+                    mapping = mapping_match.group(1)
+                    rename_match = re.match(r'\{(\S*)\s*=>\s*(\S*)\}', mapping)
+                    # case: new folder introduced
+                    if rename_match.group(1):
+                        old_name = name.replace(mapping, rename_match.group(1))
+                    else:
+                        old_name = name.replace('/' + mapping, '')
+                    if rename_match.group(2):
+                        name = name.replace(mapping, rename_match.group(2))
+                    else:
+                        name = name.replace('/' + mapping, '')
                     if old_name in revisions:
                         prev = revisions.pop(old_name)
-                        revisions[new_name]['revisions'] += prev['revisions']
-                    add_name(new_name)
-                    continue
+                        revisions[name]['revisions'] += prev['revisions']
 
-                add_name(name)
+                revisions[name]['revisions'] += 1
+                names_in_commit.append(name)
 
     return revisions, couplings
 
