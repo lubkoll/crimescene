@@ -32,7 +32,7 @@ WORDCLOUD_IDX = 2
 COMPLEXITY_TREND_IDX = 1
 COLUMNS = [
     'revisions', 'loc', 'complexity', 'mean_complexity', 'complexity_max',
-    'complexity_sd', 'soc'
+    'complexity_sd', 'soc', 'churn'
 ]
 COMPLEXITY_MEASURES = [
     'lines', 'complexity', 'mean_complexity', 'complexity_sd', 'churn'
@@ -329,7 +329,8 @@ class App:
 
         if value == 'churn':
             return {
-                name: sum(data["added_lines"]) + sum(data["removed_lines"])
+                name: sum(churn['added_lines'] + churn['removed_lines']
+                          for churn in data['churn'])
                 for name, data in self.get_stats().items()
             }
 
@@ -427,7 +428,12 @@ class App:
             2] = self.create_churn_plot()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
     def update_source(self):
-        color_data = [
+        churn = [
+            sum(churn['added_lines'] + churn['removed_lines']
+                for churn in data['churn'])
+            for data in self.get_stats().values()
+        ]
+        color_data = churn if self.color.value == 'churn' else [
             data[self.color.value] for data in self.get_stats().values()
         ]
         self.source.data = dict(
@@ -464,10 +470,11 @@ class App:
                 for name in self.get_stats()
             ],
             age=list(get_age(self.get_stats()).values()),
-            churn=[
+            churn_overview=[
                 f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
                 for data in self.get_stats().values()
-            ])
+            ],
+            churn=churn)
 
     def get_churn(self, t, key):
         return sum(churn[key] for data in self.get_stats().values()
@@ -528,7 +535,7 @@ class App:
                       ('complexity_sd', '@complexity_sd'),
                       ('complexity_max', '@complexity_max'), ('SOC', '@soc'),
                       ('authors', '@authors'), ('#authors', '@n_authors'),
-                      ('age', '@age'), ('churn', '@churn')],
+                      ('age', '@age'), ('churn', '@churn_overview')],
             x_axis_label=x_title,
             y_axis_label=y_title,
             y_axis_type='log' if y_title == 'revisions' else 'linear',

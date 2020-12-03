@@ -1,10 +1,32 @@
+from time import timezone
 from analyze_git_log import DATE_FORMAT
 from collections import defaultdict
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone, tzinfo
 import time
 import re
 import subprocess
-from typing import Dict
+from typing import Dict, Iterable, List
+
+
+@dataclass
+class Change:
+    old_filename: str = ''
+    filename: str = ''
+    added_lines: int = 0
+    removed_lines: int = 0
+
+
+@dataclass
+class Commit:
+    sha: str = ''
+    creation_time: datetime = datetime(year=2015,
+                                       month=1,
+                                       day=1,
+                                       tzinfo=timezone.utc)
+    author: str = ''
+    msg: str = ''
+    changes: Iterable[Change] = field(default_factory=list)
 
 
 def _as_rev_range(start, end):
@@ -51,59 +73,114 @@ def get_loc(root: str, before: str):
     return loc
 
 
-def get_revisions(git_log: str) -> Dict[str, int]:
+def get_commit(line: str) -> Commit:
+    commit_match = re.match(
+        r"'\[(\w+)\]\s+(\w.*\w)\s+(\d{4})-(\d{2})-(\d{2})\s+(\S.*)", line)
+    if not commit_match:
+        print(f'Failed to match commit in: {line}')
+        return None
+    creation_time = datetime(year=int(commit_match.group(3)),
+                             month=int(commit_match.group(4)),
+                             day=int(commit_match.group(5)),
+                             tzinfo=timezone.utc)
+    return Commit(sha=commit_match.group(1),
+                  author=commit_match.group(2),
+                  creation_time=creation_time,
+                  msg=commit_match.group(6))
+
+
+def get_change(line: str) -> Change:
+    change_match = re.match(r'([0-9]+)\s+([0-9]+)\s+(\S+.*)', line)
+    if change_match:
+        name = change_match.group(3)
+
+        mapping_match = re.match(r'.*(\{\S*\s*=>\s*\S*\})(.*)', name)
+        old_name = ''
+        if mapping_match:
+            mapping = mapping_match.group(1)
+            rename_match = re.match(r'\{(\S*)\s*=>\s*(\S*)\}', mapping)
+            # case: new folder introduced
+            if rename_match.group(1):
+                old_name = name.replace(mapping, rename_match.group(1))
+            else:
+                old_name = name.replace('/' + mapping, '')
+            if rename_match.group(2):
+                name = name.replace(mapping, rename_match.group(2))
+            else:
+                name = name.replace('/' + mapping, '')
+        return Change(old_filename=old_name,
+                      filename=name,
+                      added_lines=int(change_match.group(1)),
+                      removed_lines=int(change_match.group(2)))
+
+
+def get_commit_list(git_log: str) -> List[Commit]:
     lines = git_log.split('\n')
-    commits = []
+    changes = []
+    current_commit = None
     for line in lines:
         if not line:
             continue
         if line.startswith("'["):
-            commits.append(line)
+            if current_commit:
+                changes.append(current_commit)
+                current_commit = None
+            current_commit = get_commit(line)
             continue
-        commits[-1] += '\n' + line
 
-    revisions = defaultdict(lambda: {'revisions': 0, 'soc': 0})
+        if current_commit:
+            change = get_change(line)
+            if change:
+                current_commit.changes.append(change)
+
+    if current_commit:
+        changes.append(current_commit)
+    return changes
+
+
+def get_revisions(git_log: str) -> Dict[str, int]:
+    commits = sorted(get_commit_list(git_log),
+                     key=lambda commit: commit.creation_time)
+
+    revisions = defaultdict(
+        lambda: {
+            'revisions':
+            0,
+            'soc':
+            0,
+            'last_change':
+            datetime(year=2015, month=1, day=1, tzinfo=timezone.utc).timestamp(
+            ),
+            'churn': []
+        })
     couplings = defaultdict(lambda: defaultdict(int))
-    names_in_commit = []
-    commits.reverse()
+
+    def update_couplings(names_in_commit):
+        soc = len(names_in_commit)
+        for name in names_in_commit:
+            revisions[name]['soc'] += soc
+            for other_name in names_in_commit:
+                if name != other_name:
+                    couplings[name][other_name] += 1
+            couplings[name]['count'] += 1
+
     for commit in commits:
-        lines = commit.split('\n')
-        for line in lines:
-            if line.startswith("'["):
-                soc = len(names_in_commit)
-                for name in names_in_commit:
-                    revisions[name]['soc'] += soc
-                    for other_name in names_in_commit:
-                        if name != other_name:
-                            couplings[name][other_name] += 1
-                    couplings[name]['count'] += 1
-
-                names_in_commit = []
-                continue
-
-            match = re.match(r'[0-9]+\s+[0-9]+\s+(\S+.*)', line)
-            if match:
-                name = match.group(1)
-
-                mapping_match = re.match(r'.*(\{\S*\s*=>\s*\S*\})(.*)', name)
-                if mapping_match:
-                    mapping = mapping_match.group(1)
-                    rename_match = re.match(r'\{(\S*)\s*=>\s*(\S*)\}', mapping)
-                    # case: new folder introduced
-                    if rename_match.group(1):
-                        old_name = name.replace(mapping, rename_match.group(1))
-                    else:
-                        old_name = name.replace('/' + mapping, '')
-                    if rename_match.group(2):
-                        name = name.replace(mapping, rename_match.group(2))
-                    else:
-                        name = name.replace('/' + mapping, '')
-                    if old_name in revisions:
-                        prev = revisions.pop(old_name)
-                        revisions[name]['revisions'] += prev['revisions']
-
-                revisions[name]['revisions'] += 1
-                names_in_commit.append(name)
+        for change in commit.changes:
+            if change.old_filename:
+                revisions[change.filename] = revisions[change.old_filename]
+                revisions.pop(change.old_filename)
+            revisions[change.filename]['revisions'] += 1
+            revisions[change.filename][
+                'last_change'] = commit.creation_time.timestamp()
+            revisions[change.filename]['churn'].append({
+                'timestamp':
+                revisions[change.filename]['last_change'],
+                'added_lines':
+                change.added_lines,
+                'removed_lines':
+                change.removed_lines
+            })
+        update_couplings([change.filename for change in commit.changes])
 
     return revisions, couplings
 
