@@ -35,12 +35,12 @@ COLUMNS = [
     'complexity_sd', 'soc'
 ]
 COMPLEXITY_MEASURES = [
-    'lines', 'complexity', 'mean_complexity', 'complexity_sd'
+    'lines', 'complexity', 'mean_complexity', 'complexity_sd', 'churn'
 ]
 COMPLEXITY_X = ['revisions', 'date']
 CIRC_PACK_CRITERIA = [
     'soc', 'mean_complexity', 'complexity', 'complexity_sd', 'revisions',
-    'author'
+    'author', 'age', 'churn'
 ]
 DATE_FORMAT = '%Y-%m-%d'
 
@@ -149,6 +149,19 @@ def get_workcloud_plot(end: datetime, period: timedelta):
     return wordcloud
 
 
+def get_age(stats, inverse=False):
+    def f(value):
+        return 1 / value if inverse else value
+
+    return {
+        name: f(
+            to_days(
+                datetime.now(tz=timezone.utc) - datetime.fromtimestamp(
+                    stats[name]['last_change'], tz=timezone.utc)))
+        for name in stats
+    }
+
+
 def ms_to_datetime(ms: float):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
@@ -238,8 +251,10 @@ class App:
                           width=CONTROL_WIDTH)
         self.layout = column(
             row(self.range_slider, self.range_button),
-            row(controls,
-                column(self.create_figure(), self.circular_package.plot)),
+            row(
+                controls,
+                column(self.create_figure(), self.circular_package.plot,
+                       self.create_churn_plot())),
         )
         self.update_wordcloud()
         self.update_summary()
@@ -309,6 +324,15 @@ class App:
                 for module in self.get_stats()
             }
 
+        if value == 'age':
+            return get_age(self.get_stats(), inverse=True)
+
+        if value == 'churn':
+            return {
+                name: sum(data["added_lines"]) + sum(data["removed_lines"])
+                for name, data in self.get_stats().items()
+            }
+
         return {
             module: data[value]
             for module, data in self.get_stats().items()
@@ -359,7 +383,6 @@ class App:
         t2 = time.time()
         self.stats[self.range_slider.value] = stats
         self.couplings[self.range_slider.value] = couplings
-        #       summary = get_summary(self.git_log)
         t3 = time.time()
         locs = get_loc(root=PREFIX, before=period_end)
         add_loc(self.get_stats(), locs)
@@ -367,7 +390,6 @@ class App:
         add_complexity_analysis(root=PREFIX,
                                 end=period_end,
                                 stats=self.get_stats())
-        #        self.summary.text = f'Summary:</br>#files: {summary["#files"]}</br>#changed: {summary["#changed"]}</br>#revisions: {summary["#revisions"]}</br>#authors: {summary["#authors"]}'
 
         t5 = time.time()
         add_repo_main_authors(root=PREFIX, stats=self.get_stats())
@@ -398,33 +420,11 @@ class App:
         self.update_source()
         self.update_wordcloud()
         self.circular_package = self.get_circular_package()
-        # x_values = [
-        #     data[self.x_menu.value] for data in self.get_stats().values()
-        # ]
-        # y_values = [
-        #     data[self.y_menu.value] for data in self.get_stats().values()
-        # ]
-        # min_x = min(x_values)
-        # max_x = max(x_values)
-        # dx = max_x - min_x
-        # self.layout.children[1].children[1].children[0].x_range.update(
-        #     start=min_x - 0.3 * dx, end=max_x + 0.2 * dx)
-        # self.layout.children[1].children[1].children[
-        #     0].x_range.start = min_x - 0.1 * dx
-        # self.layout.children[1].children[1].children[
-        #     0].x_range.end = max_x + 0.1 * dx
-        # min_y = min(y_values)
-        # max_y = max(y_values)
-        # dy = max_y - min_y
-        # self.layout.children[1].children[1].children[0].y_range.update(
-        #     start=min_y - 0.3 * dy, end=max_y + 0.2 * dy)
-        # self.layout.children[1].children[1].children[
-        #     0].y_range.start = min_y - 0.1 * dy
-        # self.layout.children[1].children[1].children[
-        #     0].y_range.end = max_y + 0.1 * dy
         self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
         self.layout.children[1].children[1].children[
             1] = self.circular_package.plot  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+        self.layout.children[1].children[1].children[
+            2] = self.create_churn_plot()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
     def update_source(self):
         color_data = [
@@ -462,7 +462,57 @@ class App:
             n_authors=[
                 self.get_stats()[name]['authors'][1]
                 for name in self.get_stats()
+            ],
+            age=list(get_age(self.get_stats()).values()),
+            churn=[
+                f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
+                for data in self.get_stats().values()
             ])
+
+    def get_churn(self, t, key):
+        return sum(churn[key] for data in self.get_stats().values()
+                   for churn in data['churn']
+                   if t == datetime.fromtimestamp(churn['timestamp'],
+                                                  tz=timezone.utc).date())
+
+    def get_churn_for_file(self, filename, t, key):
+        return sum(churn[key] for churn in self.get_stats()[filename]['churn']
+                   if t == datetime.fromtimestamp(churn['timestamp'],
+                                                  tz=timezone.utc).date())
+
+    def create_churn_plot(self):
+        p = figure(title="Code Age",
+                   x_axis_label='days',
+                   y_axis_label='churn',
+                   x_axis_type='datetime',
+                   plot_width=PLOT_WIDTH,
+                   plot_height=PLOT_HEIGHT,
+                   tools='pan,xwheel_zoom,reset')
+
+        start_date = ms_to_datetime(self.range_slider.value[0])
+        end_date = self.date_slider_value()
+        n_days = int(to_days(end_date - start_date))
+        x = [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
+
+        added = [self.get_churn(t.date(), key='added_lines') for t in x]
+        removed = [self.get_churn(t.date(), key='removed_lines') for t in x]
+        p.line(x=[
+            datetime(year=t.year,
+                     month=t.month,
+                     day=t.day,
+                     tzinfo=timezone.utc) for t in x
+        ],
+               y=added,
+               color='orange')
+        p.line(x=[
+            datetime(year=t.year,
+                     month=t.month,
+                     day=t.day,
+                     tzinfo=timezone.utc) for t in x
+        ],
+               y=removed,
+               color='blue')
+        return p
 
     def create_figure(self):
         self.update_source()
@@ -477,7 +527,8 @@ class App:
                       ('mean_complexity', '@mean_complexity'),
                       ('complexity_sd', '@complexity_sd'),
                       ('complexity_max', '@complexity_max'), ('SOC', '@soc'),
-                      ('authors', '@authors'), ('#authors', '@n_authors')],
+                      ('authors', '@authors'), ('#authors', '@n_authors'),
+                      ('age', '@age'), ('churn', '@churn')],
             x_axis_label=x_title,
             y_axis_label=y_title,
             y_axis_type='log' if y_title == 'revisions' else 'linear',
@@ -519,6 +570,8 @@ class App:
                       ('complexity', '@complexity'),
                       ('mean_complexity', '@mean_complexity'),
                       ('complexity_sd', '@complexity_sd'),
+                      ('added_lines', '@added_lines'),
+                      ('removed_lines', '@removed_lines'),
                   ],
                   x_axis_label=self.complexity_x.value,
                   y_axis_label=self.complexity_measures.value,
@@ -544,6 +597,23 @@ class App:
                 datetime.fromtimestamp(int(row[5]))
                 for row in self.complexity_trend
             ]
+
+        x0 = [
+            datetime.fromtimestamp(int(row[5]))
+            for row in self.complexity_trend
+        ]
+
+        added = [
+            self.get_churn_for_file(filename=selected_file,
+                                    t=t.date(),
+                                    key='added_lines') for t in x0
+        ]
+        removed = [
+            self.get_churn_for_file(filename=selected_file,
+                                    t=t.date(),
+                                    key='removed_lines') for t in x0
+        ]
+
         self.complexity_analysis_source.data = dict(
             x=x,
             y=measure,
@@ -561,17 +631,41 @@ class App:
                 row[1 + COMPLEXITY_MEASURES.index('complexity_sd')]
                 for row in self.complexity_trend
             ],
-        )
-        p.line(x='x',
-               y='y',
-               source=self.complexity_analysis_source,
-               line_width=3,
-               line_color='orange')
-        p.circle(x='x',
-                 y='y',
-                 source=self.complexity_analysis_source,
-                 color='orange',
-                 size=10)
+            added_lines=added,
+            removed_lines=removed)
+
+        if self.complexity_measures.value == 'churn':
+            p.line(x='x',
+                   y='added_lines',
+                   source=self.complexity_analysis_source,
+                   line_width=3,
+                   line_color='orange')
+            p.circle(x='x',
+                     y='added_lines',
+                     source=self.complexity_analysis_source,
+                     color='orange',
+                     size=10)
+            p.line(x='x',
+                   y='removed_lines',
+                   source=self.complexity_analysis_source,
+                   line_width=3,
+                   line_color='blue')
+            p.circle(x='x',
+                     y='removed_lines',
+                     source=self.complexity_analysis_source,
+                     color='blue',
+                     size=10)
+        else:
+            p.line(x='x',
+                   y='y',
+                   source=self.complexity_analysis_source,
+                   line_width=3,
+                   line_color='orange')
+            p.circle(x='x',
+                     y='y',
+                     source=self.complexity_analysis_source,
+                     color='orange',
+                     size=10)
         return p
 
     def create_complexity_trend(self):
