@@ -1,3 +1,4 @@
+from git_log import GitLog
 import json
 import os
 import sqlite3
@@ -6,7 +7,7 @@ import time
 
 from miner.git_complexity_trend import compute_complexity_trend
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone
 
 from bokeh.core.enums import Align
 from bokeh.layouts import column, row
@@ -19,7 +20,7 @@ import transform.csv_as_enclosure_json as csv_as_enclosure_json
 from analyze_git_log import add_complexity_analysis, to_days
 from circular_package import CircularPackage, get_main_author
 from color_map import get_colors
-from process_git_log import get_first_commit_date, get_first_commit_sha, get_last_commit_sha, get_log, get_revisions, get_loc, add_loc, add_repo_main_authors, read_commit_messages
+from process_git_log import get_loc, add_loc, read_locs
 
 HOME = str(Path.home())
 PROJECT = 'Spacy'
@@ -45,7 +46,7 @@ CIRC_PACK_CRITERIA = [
 ]
 DATE_FORMAT = '%Y-%m-%d'
 
-DB_PATH = "data.db"
+DB_PATH = "cache.db"
 
 
 class SQL:
@@ -118,15 +119,14 @@ def wordcloud_file(end: str, period: timedelta):
     return f'{STATS_PATH}/wordcloud_{end}_{to_days(period)}.png'
 
 
-def generate_wordcloud(root: str, end: datetime, period: timedelta):
-    end_str = end.strftime(DATE_FORMAT)
-    text = read_commit_messages(root=root,
-                                start=(end - period).strftime(DATE_FORMAT),
-                                end=end_str)
+def generate_wordcloud(git_log: GitLog, end: datetime, period: timedelta):
+    text = ' '.join(git_log.commit_msg(begin=end - period,
+                                       end=end)).replace("'", "")
     wordcloud = WordCloud(stopwords=STOPWORDS | PROJECT_STOPWORDS,
                           background_color='white')
     wordcloud.generate(text)
-    wordcloud.to_file(wordcloud_file(end=end_str, period=period))
+    wordcloud.to_file(
+        wordcloud_file(end=end.strftime(DATE_FORMAT), period=period))
 
 
 def get_workcloud_plot(end: datetime, period: timedelta):
@@ -169,8 +169,7 @@ def ms_to_datetime(ms: float):
 
 class App:
     def __init__(self) -> None:
-        self.initial_commit_sha = get_first_commit_sha(root=PREFIX)
-        self.last_commit_sha = get_last_commit_sha(root=PREFIX)
+        self.git_log = GitLog.from_dir(PREFIX)
         self.selected = []
         self.complexity_trend = []
         self.db = SQL()
@@ -178,18 +177,17 @@ class App:
         stats, couplings = self.db.read_stats(project_name=PROJECT)
         self.stats = stats
         self.couplings = couplings
-        self.git_log = ''
+        self.start_loc = 0
         self.summary = Div(text='', width=CONTROL_WIDTH, height=100)
 
-        first_commit_date = get_first_commit_date(root=PREFIX)
-        today = date.today()
+        today = datetime.now(tz=timezone.utc)
         period_start = today - timedelta(days=800)
 
         self.source = ColumnDataSource(
             data=dict(x=[], y=[], module=[], revisions=[], size=[]))
         self.source.selected.on_change('indices', self.update_selected)  # pylint: disable=no-member
         self.complexity_analysis_source = ColumnDataSource(
-            data=dict(x=[], y=[], commit_msg=[]))
+            data=dict(x=[], y=[], sha=[]))
         self.x_menu = Select(title='X-Axis', value=COLUMNS[3], options=COLUMNS)
         self.x_menu.on_change('value', self.update_table)
 
@@ -215,13 +213,13 @@ class App:
         self.complexity_measures.on_change('value',
                                            self.update_detailed_analysis)
 
-        self.range_slider = DateRangeSlider(start=first_commit_date,
-                                            end=today,
-                                            step=1,
-                                            value=(period_start, today),
-                                            title='Range',
-                                            width=CONTROL_WIDTH + PLOT_WIDTH -
-                                            100)
+        self.range_slider = DateRangeSlider(
+            start=self.git_log.first_commit_date(),
+            end=today,
+            step=1,
+            value=(period_start, today),
+            title='Range',
+            width=CONTROL_WIDTH + PLOT_WIDTH - 100)
 
         self.range_button = Button(label="Select",
                                    button_type="default",
@@ -233,13 +231,12 @@ class App:
         self.minus_button = Button(label='-', button_type='default', width=50)
         self.minus_button.on_click(self.decrease_dates)
 
-        generate_wordcloud(root=PREFIX,
+        generate_wordcloud(git_log=self.git_log,
                            end=self.date_slider_value(),
                            period=self.period_length())
         wordcloud = get_workcloud_plot(end=self.date_slider_value(),
                                        period=self.period_length())
-        self.update_stats(period_start=period_start.strftime(DATE_FORMAT),
-                          period_end=today.strftime(DATE_FORMAT))
+        self.update_stats(period_start=period_start, period_end=today)
         self.update_source()
         self.circular_package = self.get_circular_package()
         controls = column(row(self.minus_button, self.plus_button),
@@ -355,6 +352,11 @@ class App:
                                stats=self.get_stats(),
                                selected_callback=self.update_circ_selected)
 
+    def add_repo_main_authors(self, max_authors: int = 3):
+        for module, data in self.get_stats().items():
+            data['authors'] = self.git_log.get_main_authors(
+                filename=module, max_authors=max_authors)
+
     def date_slider_value(self):
         return ms_to_datetime(self.range_slider.value[1])
 
@@ -372,29 +374,37 @@ class App:
                 for author in authors))
         self.summary.text = f'Summary:</br>#files: {len(self.get_stats())}</br>#changed: {n_changed}</br>#authors: {n_authors}'
 
-    def update_stats(self, period_start: str, period_end: str):
+    def update_stats(self, period_start: datetime, period_end: datetime):
         if self.range_slider.value in self.stats:
             self.update_summary()
+            self.start_loc = sum(
+                read_locs(
+                    get_loc(
+                        root=PREFIX,
+                        before=period_start.strftime(DATE_FORMAT))).values())
             return
         t0 = time.time()
-        self.git_log = get_log(root=PREFIX,
-                               after=period_start,
-                               before=period_end)
         t1 = time.time()
-        stats, couplings = get_revisions(self.git_log)
+        stats, couplings = self.git_log.get_revisions(begin=period_start,
+                                                      end=period_end)
+        self.start_loc = sum(
+            read_locs(
+                get_loc(root=PREFIX,
+                        before=period_start.strftime(DATE_FORMAT))).values())
+        print(f'START LOC {self.start_loc}')
         t2 = time.time()
         self.stats[self.range_slider.value] = stats
         self.couplings[self.range_slider.value] = couplings
         t3 = time.time()
-        locs = get_loc(root=PREFIX, before=period_end)
+        locs = get_loc(root=PREFIX, before=period_end.strftime(DATE_FORMAT))
         add_loc(self.get_stats(), locs)
         t4 = time.time()
         add_complexity_analysis(root=PREFIX,
-                                end=period_end,
+                                end=period_end.strftime(DATE_FORMAT),
                                 stats=self.get_stats())
 
         t5 = time.time()
-        add_repo_main_authors(root=PREFIX, stats=self.get_stats())
+        self.add_repo_main_authors()
         t6 = time.time()
         self.update_summary()
         t7 = time.time()
@@ -406,18 +416,20 @@ class App:
                             couplings=couplings)
 
     def update_wordcloud(self):
-        generate_wordcloud(root=PREFIX,
+        generate_wordcloud(git_log=self.git_log,
                            end=self.date_slider_value(),
                            period=self.period_length())
         wordcloud = get_workcloud_plot(end=self.date_slider_value(),
                                        period=self.period_length())
         self.layout.children[1].children[0].children[WORDCLOUD_IDX] = wordcloud  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
+    def get_period_as_datetime(self):
+        period_start, period_end = self.range_slider.value
+        return ms_to_datetime(period_start), ms_to_datetime(period_end)
+
     def update_date_range(self):
         self.circular_package.reset_selection()
-        period_start, period_end = self.range_slider.value
-        period_start = ms_to_datetime(period_start).strftime(DATE_FORMAT)
-        period_end = ms_to_datetime(period_end).strftime(DATE_FORMAT)
+        period_start, period_end = self.get_period_as_datetime()
         self.update_stats(period_start=period_start, period_end=period_end)
         self.update_source()
         self.update_wordcloud()
@@ -437,6 +449,10 @@ class App:
         color_data = churn if self.color.value == 'churn' else [
             data[self.color.value] for data in self.get_stats().values()
         ]
+
+        def get_author(author, ratio):
+            return f'{author} ({round(ratio,2)})'
+
         self.source.data = dict(
             module=list(self.get_stats().keys()),
             loc=[data['loc'] for data in self.get_stats().values()],
@@ -463,7 +479,9 @@ class App:
             soc=[data['soc'] for data in self.get_stats().values()],
             color=get_colors(color_data),
             authors=[
-                ', '.join(self.get_stats()[name]['authors'][0].keys())
+                ', '.join(
+                    get_author(author, ratio) for author, ratio in
+                    self.get_stats()[name]['authors'][0].items())
                 for name in self.get_stats()
             ],
             n_authors=[
@@ -484,9 +502,13 @@ class App:
                                                   tz=timezone.utc).date())
 
     def get_churn_for_file(self, filename, t, key):
-        return sum(churn[key] for churn in self.get_stats()[filename]['churn']
-                   if t == datetime.fromtimestamp(churn['timestamp'],
-                                                  tz=timezone.utc).date())
+        idx = 3 if key == 'added_lines' else 4
+        period_start, period_end = self.get_period_as_datetime()
+        return sum([
+            churn[idx] for churn in self.git_log.get_churn_for(
+                filename=filename, begin=period_start, end=period_end)
+            if t == churn[1].date()
+        ])
 
     def get_time_axis(self):
         start_date = ms_to_datetime(self.range_slider.value[0])
@@ -495,33 +517,23 @@ class App:
         return [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
 
     def create_churn_plot(self):
-        p = figure(title="Code Age",
+        p = figure(title="Churn",
                    x_axis_label='days',
-                   y_axis_label='churn',
+                   y_axis_label='loc',
                    x_axis_type='datetime',
                    plot_width=PLOT_WIDTH,
                    plot_height=PLOT_HEIGHT,
                    tools='pan,xwheel_zoom,reset')
-
         x = self.get_time_axis()
         added = [self.get_churn(t.date(), key='added_lines') for t in x]
         removed = [self.get_churn(t.date(), key='removed_lines') for t in x]
-        p.line(x=[
-            datetime(year=t.year,
-                     month=t.month,
-                     day=t.day,
-                     tzinfo=timezone.utc) for t in x
-        ],
-               y=added,
-               color='orange')
-        p.line(x=[
-            datetime(year=t.year,
-                     month=t.month,
-                     day=t.day,
-                     tzinfo=timezone.utc) for t in x
-        ],
-               y=removed,
-               color='blue')
+        locs = [self.start_loc]
+        for idx in range(len(x) - 1):
+            locs.append(locs[idx] + added[idx] - removed[idx])
+        p.line(x=x, y=added, color='orange', legend_label='added')
+        p.line(x=x, y=removed, color='blue', legend_label='removed')
+        p.line(x=x, y=locs, color='gray', legend_label='lines of code')
+        p.legend.location = "top_left"
         return p
 
     def create_figure(self):
@@ -569,84 +581,115 @@ class App:
         selected_file = self.get_selected_file()
         self.complexity_trend = compute_complexity_trend(
             PREFIX, selected_file,
-            (self.initial_commit_sha, self.last_commit_sha))
+            (self.git_log.first_commit_sha(), self.git_log.last_commit_sha()))
 
     def display_complexity_trend(self):
         selected_file = self.get_selected_file()
-        kw = dict(title=f'Complexity Trend: {selected_file}',
-                  tooltips=[
-                      ('sha', '@sha'),
-                      ('msg', '@commit_msg'),
-                      ('date', '@date'),
-                      ('complexity', '@complexity'),
-                      ('mean_complexity', '@mean_complexity'),
-                      ('complexity_sd', '@complexity_sd'),
-                      ('added_lines', '@added_lines'),
-                      ('removed_lines', '@removed_lines'),
-                  ],
-                  x_axis_label=self.complexity_x.value,
-                  y_axis_label=self.complexity_measures.value,
-                  x_axis_type='linear' if self.complexity_x.value
-                  == COMPLEXITY_X[0] else 'datetime')
+        kw = dict(
+            title=f'Complexity Trend: {selected_file}',
+            tooltips=[
+                ('sha', '@sha'),
+                ('msg', '@commit_msg'),
+                ('date', '@date'),
+                #   ('complexity', '@complexity'),
+                #   ('mean_complexity', '@mean_complexity'),
+                #   ('complexity_sd', '@complexity_sd'),
+                #   ('added_lines', '@added_lines'),
+                #   ('removed_lines', '@removed_lines'),
+            ],
+            x_axis_label=self.complexity_x.value,
+            y_axis_label=self.complexity_measures.value,
+            x_axis_type='linear'
+            if self.complexity_x.value == COMPLEXITY_X[0] else 'datetime')
 
         p = figure(plot_height=600,
                    plot_width=800,
                    tools='pan,box_zoom,hover,reset',
                    **kw)
         p.toolbar.logo = None
-        revs = [row[0] for row in self.complexity_trend]
-        measure = [
-            row[1 + COMPLEXITY_MEASURES.index(self.complexity_measures.value)]
-            for row in self.complexity_trend
-        ]
         x = []
-        x0 = [
-            datetime.fromtimestamp(int(row[5]))
-            for row in self.complexity_trend
-        ]
-        if self.complexity_x.value == COMPLEXITY_X[0]:
-            x = list(range(len(revs)))
-            p.xaxis.ticker = x
-            p.xaxis.major_label_overrides = dict(enumerate(revs))
+        x0 = []
+        churn = []
+        measure = []
+        if self.complexity_measures.value == 'churn':
+            period_start, period_end = self.get_period_as_datetime()
+            churn = self.git_log.get_churn_for(filename=selected_file,
+                                               begin=period_start,
+                                               end=period_end)
+            revs = [sha for sha, _, _, _, _ in churn]
+            measure = [0 for _ in revs]
+            if self.complexity_x.value == COMPLEXITY_X[0]:
+                x = list(range(len(revs)))
+                p.xaxis.ticker = x
+                p.xaxis.major_label_overrides = dict(enumerate(revs))
+            else:
+                x = [time for _, time, _, _, _ in churn]
+            x0 = [time for _, time, _, _, _ in churn]
         else:
-            x = [
+            measure = [
+                row[1 +
+                    COMPLEXITY_MEASURES.index(self.complexity_measures.value)]
+                for row in self.complexity_trend
+            ]
+            revs = [row[0] for row in self.complexity_trend]
+            x0 = [
                 datetime.fromtimestamp(int(row[5]))
                 for row in self.complexity_trend
             ]
+            if self.complexity_x.value == COMPLEXITY_X[0]:
+                x = list(range(len(revs)))
+                p.xaxis.ticker = x
+                p.xaxis.major_label_overrides = dict(enumerate(revs))
+            else:
+                x = [
+                    datetime.fromtimestamp(int(row[5]))
+                    for row in self.complexity_trend
+                ]
 
-        added = [
-            self.get_churn_for_file(filename=selected_file,
-                                    t=t.date(),
-                                    key='added_lines') for t in x0
-        ]
+        added = []
+        for t in x0:
+            # if 'linearBlockOperator' in selected_file:
+            #     print(f'{t}:')
+            added.append(
+                self.get_churn_for_file(filename=selected_file,
+                                        t=t.date(),
+                                        key='added_lines'))
+        #     self.get_churn_for_file(filename=selected_file,
+        #                             t=t.date(),
+        #                             key='added_lines') for t in x0
+        # ]
         removed = [
             self.get_churn_for_file(filename=selected_file,
                                     t=t.date(),
                                     key='removed_lines') for t in x0
         ]
-
+        msgs = [msg for _, _, msg, _, _ in churn
+                ] if self.complexity_measures.value == 'churn' else [
+                    row[6] for row in self.complexity_trend
+                ]
+        print(f'MSGS {msgs}')
         self.complexity_analysis_source.data = dict(
             x=x,
             y=measure,
             sha=revs,
-            commit_msg=[row[6] for row in self.complexity_trend],
-            date=[
-                datetime.fromtimestamp(int(row[5]),
-                                       tz=timezone.utc).strftime(DATE_FORMAT)
-                for row in self.complexity_trend
-            ],
-            complexity=[
-                row[1 + COMPLEXITY_MEASURES.index('complexity')]
-                for row in self.complexity_trend
-            ],
-            mean_complexity=[
-                row[1 + COMPLEXITY_MEASURES.index('mean_complexity')]
-                for row in self.complexity_trend
-            ],
-            complexity_sd=[
-                row[1 + COMPLEXITY_MEASURES.index('complexity_sd')]
-                for row in self.complexity_trend
-            ],
+            commit_msg=msgs,
+            # date=[
+            #     datetime.fromtimestamp(int(row[5]),
+            #                            tz=timezone.utc).strftime(DATE_FORMAT)
+            #     for row in self.complexity_trend
+            # ],
+            # complexity=[
+            #     row[1 + COMPLEXITY_MEASURES.index('complexity')]
+            #     for row in self.complexity_trend
+            # ],
+            # mean_complexity=[
+            #     row[1 + COMPLEXITY_MEASURES.index('mean_complexity')]
+            #     for row in self.complexity_trend
+            # ],
+            # complexity_sd=[
+            #     row[1 + COMPLEXITY_MEASURES.index('complexity_sd')]
+            #     for row in self.complexity_trend
+            # ],
             added_lines=added,
             removed_lines=removed)
 
