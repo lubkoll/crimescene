@@ -16,6 +16,9 @@ class Change:
     added_lines: int = 0
     removed_lines: int = 0
 
+    def __str__(self) -> str:
+        return f'Change(old_filename={self.old_filename}, filename={self.filename}, added_lines={self.added_lines}, removed_lines={self.removed_lines})'
+
 
 @dataclass
 class Commit:
@@ -27,6 +30,9 @@ class Commit:
     author: str = ''
     msg: str = ''
     changes: Iterable[Change] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        return f'[{self.sha}] {self.author} {self.creation_time} {self.msg}\n{self.changes}'
 
 
 def _as_rev_range(start, end):
@@ -116,14 +122,14 @@ def get_change(line: str) -> Change:
 
 def get_commit_list(git_log: str) -> List[Commit]:
     lines = git_log.split('\n')
-    changes = []
+    commits = []
     current_commit = None
     for line in lines:
         if not line:
             continue
         if line.startswith("'["):
             if current_commit:
-                changes.append(current_commit)
+                commits.append(current_commit)
                 current_commit = None
             current_commit = get_commit(line)
             continue
@@ -134,8 +140,9 @@ def get_commit_list(git_log: str) -> List[Commit]:
                 current_commit.changes.append(change)
 
     if current_commit:
-        changes.append(current_commit)
-    return changes
+        commits.append(current_commit)
+
+    return commits
 
 
 def get_revisions(git_log: str) -> Dict[str, int]:

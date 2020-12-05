@@ -1,10 +1,11 @@
 import json
+import os
 import sqlite3
 import sys
 import time
 
 from miner.git_complexity_trend import compute_complexity_trend
-sys.path.append('/home/lars/projects/bokeh/example/app/crossfilter')
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from datetime import datetime, timedelta, timezone, date
 
 from bokeh.core.enums import Align
@@ -142,7 +143,7 @@ def get_workcloud_plot(end: datetime, period: timedelta):
     wordcloud.ygrid.grid_line_color = None
     wordcloud.outline_line_alpha = 0
     wordcloud.image_url(url=[
-        f'crossfilter/static/wordcloud_{end.strftime(DATE_FORMAT)}_{to_days(period)}.png'
+        f'crimescene/static/wordcloud_{end.strftime(DATE_FORMAT)}_{to_days(period)}.png'
     ],
                         x=0,
                         y=1)
@@ -422,10 +423,10 @@ class App:
         self.update_wordcloud()
         self.circular_package = self.get_circular_package()
         self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-        self.layout.children[1].children[1].children[
-            1] = self.circular_package.plot  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-        self.layout.children[1].children[1].children[
-            2] = self.create_churn_plot()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+        self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+            1] = self.circular_package.plot
+        self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+            2] = self.create_churn_plot()
 
     def update_source(self):
         churn = [
@@ -487,6 +488,12 @@ class App:
                    if t == datetime.fromtimestamp(churn['timestamp'],
                                                   tz=timezone.utc).date())
 
+    def get_time_axis(self):
+        start_date = ms_to_datetime(self.range_slider.value[0])
+        end_date = self.date_slider_value()
+        n_days = int(to_days(end_date - start_date))
+        return [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
+
     def create_churn_plot(self):
         p = figure(title="Code Age",
                    x_axis_label='days',
@@ -496,11 +503,7 @@ class App:
                    plot_height=PLOT_HEIGHT,
                    tools='pan,xwheel_zoom,reset')
 
-        start_date = ms_to_datetime(self.range_slider.value[0])
-        end_date = self.date_slider_value()
-        n_days = int(to_days(end_date - start_date))
-        x = [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
-
+        x = self.get_time_axis()
         added = [self.get_churn(t.date(), key='added_lines') for t in x]
         removed = [self.get_churn(t.date(), key='removed_lines') for t in x]
         p.line(x=[
@@ -574,6 +577,7 @@ class App:
                   tooltips=[
                       ('sha', '@sha'),
                       ('msg', '@commit_msg'),
+                      ('date', '@date'),
                       ('complexity', '@complexity'),
                       ('mean_complexity', '@mean_complexity'),
                       ('complexity_sd', '@complexity_sd'),
@@ -584,6 +588,7 @@ class App:
                   y_axis_label=self.complexity_measures.value,
                   x_axis_type='linear' if self.complexity_x.value
                   == COMPLEXITY_X[0] else 'datetime')
+
         p = figure(plot_height=600,
                    plot_width=800,
                    tools='pan,box_zoom,hover,reset',
@@ -595,6 +600,10 @@ class App:
             for row in self.complexity_trend
         ]
         x = []
+        x0 = [
+            datetime.fromtimestamp(int(row[5]))
+            for row in self.complexity_trend
+        ]
         if self.complexity_x.value == COMPLEXITY_X[0]:
             x = list(range(len(revs)))
             p.xaxis.ticker = x
@@ -604,11 +613,6 @@ class App:
                 datetime.fromtimestamp(int(row[5]))
                 for row in self.complexity_trend
             ]
-
-        x0 = [
-            datetime.fromtimestamp(int(row[5]))
-            for row in self.complexity_trend
-        ]
 
         added = [
             self.get_churn_for_file(filename=selected_file,
@@ -624,8 +628,13 @@ class App:
         self.complexity_analysis_source.data = dict(
             x=x,
             y=measure,
-            commit_msg=[row[6] for row in self.complexity_trend],
             sha=revs,
+            commit_msg=[row[6] for row in self.complexity_trend],
+            date=[
+                datetime.fromtimestamp(int(row[5]),
+                                       tz=timezone.utc).strftime(DATE_FORMAT)
+                for row in self.complexity_trend
+            ],
             complexity=[
                 row[1 + COMPLEXITY_MEASURES.index('complexity')]
                 for row in self.complexity_trend
@@ -643,16 +652,6 @@ class App:
 
         if self.complexity_measures.value == 'churn':
             p.line(x='x',
-                   y='added_lines',
-                   source=self.complexity_analysis_source,
-                   line_width=3,
-                   line_color='orange')
-            p.circle(x='x',
-                     y='added_lines',
-                     source=self.complexity_analysis_source,
-                     color='orange',
-                     size=10)
-            p.line(x='x',
                    y='removed_lines',
                    source=self.complexity_analysis_source,
                    line_width=3,
@@ -661,6 +660,16 @@ class App:
                      y='removed_lines',
                      source=self.complexity_analysis_source,
                      color='blue',
+                     size=10)
+            p.line(x='x',
+                   y='added_lines',
+                   source=self.complexity_analysis_source,
+                   line_width=3,
+                   line_color='orange')
+            p.circle(x='x',
+                     y='added_lines',
+                     source=self.complexity_analysis_source,
+                     color='orange',
                      size=10)
         else:
             p.line(x='x',
@@ -715,31 +724,31 @@ class App:
 
     def update_selected(self, attr, old, new):
         self.selected = new
-        #        self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-        if len(self.layout.children[1].children) == 3:
+        if len(self.layout.children[1].children) == 3:  # pylint: disable=unsubscriptable-object
             if self.selected:
-                self.layout.children[1].children[2].children[
-                    COMPLEXITY_TREND_IDX] = self.create_complexity_trend()  # pylint: disable=unsupported-assignment-operation
-                self.layout.children[1].children[2].children[
-                    COMPLEXITY_TREND_IDX + 1] = self.create_coupling_table()  # pylint: disable=unsupported-assignment-operation
+                self.layout.children[1].children[2].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+                    COMPLEXITY_TREND_IDX] = self.create_complexity_trend()
+                self.layout.children[1].children[2].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+                    COMPLEXITY_TREND_IDX + 1] = self.create_coupling_table()
             else:
-                del self.layout.children[1].children[2]  # pylint: disable=unsupported-delete-operation
-        if len(self.layout.children[1].children) == 2 and self.selected:
-            self.layout.children[1].children.append(  # pylint: disable=no-member
+                del self.layout.children[1].children[2]  # pylint: disable=unsupported-delete-operation,unsubscriptable-object
+        if len(self.layout.children[1].children) == 2 and self.selected:  # pylint: disable=unsubscriptable-object
+            self.layout.children[1].children.append(  # pylint: disable=no-member,unsubscriptable-object
                 column(
                     row(self.complexity_measures,
                         self.complexity_x,
-                        align=Align.center), self.create_complexity_trend(),
+                        align=Align.center),  # pylint: disable=no-member
+                    self.create_complexity_trend(),
                     self.create_coupling_table()))
         if self.circ_pack_color.value == 'soc':
             self.update_circ_pack_color('value', '',
                                         self.circ_pack_color.value)
 
     def update_detailed_analysis(self, attr, old, new):
-        if len(self.layout.children[1].children) < 3:
+        if len(self.layout.children[1].children) < 3:  # pylint: disable=unsubscriptable-object
             return
-        self.layout.children[1].children[2].children[
-            COMPLEXITY_TREND_IDX] = self.display_complexity_trend()  # pylint: disable=unsubscriptable-object
+        self.layout.children[1].children[2].children[  # pylint: disable=unsubscriptable-object
+            COMPLEXITY_TREND_IDX] = self.display_complexity_trend()
 
 
 MIN_DATUM = 0.0
