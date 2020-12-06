@@ -5,11 +5,9 @@ import os
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
-import miner.desc_stats as desc_stats
+from git_log import DescriptiveStats
 import miner.complexity_calculations as complexity_calculations
-import pathlib
 
-#APP_ROOT = pathlib.Path(__file__).parent.absolute()
 DATE_FORMAT = '%Y-%m-%d'
 
 
@@ -43,8 +41,7 @@ def add_complexity_analysis(root: str, end: str, stats):
             with open(root + filename, "r") as file_to_calc:
                 complexity_by_line = complexity_calculations.calculate_complexity_in(
                     file_to_calc.read())
-                d_stats = desc_stats.DescriptiveStats(filename,
-                                                      complexity_by_line)
+                d_stats = DescriptiveStats(filename, complexity_by_line)
                 if not stats[filename]:
                     print(f'MISSING: {filename}')
                 stats[filename]['lines'] = d_stats.n_revs

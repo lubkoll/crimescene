@@ -19,7 +19,7 @@ def _run_cmd(root, args):
 
 def get_log(root: str, after: str, before: str):
     return _run_cmd(root, [
-        'git', 'log', "--pretty=format:'[%h] %an %cd %s'", '--date=short',
+        'git', 'log', "--pretty=format:'[%h] %aN %cd %s'", '--date=short',
         f'--after={after}', f'--before={before}', '--numstat'
     ])
 

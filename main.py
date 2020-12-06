@@ -1,20 +1,19 @@
-from git_log import GitLog
+from get_wordcloud import get_new_workcloud_plot
+from git_log import GitLog, DATE_FORMAT
+from file_analysis import FileAnalysis
 import json
 import os
 import sqlite3
 import sys
 import time
 
-from miner.git_complexity_trend import compute_complexity_trend
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from datetime import datetime, timedelta, timezone
 
-from bokeh.core.enums import Align
 from bokeh.layouts import column, row
 from bokeh.models import ColumnDataSource, Select, Div, DateRangeSlider, Button
 from bokeh.plotting import curdoc, figure
 from pathlib import Path
-from wordcloud import WordCloud, STOPWORDS
 
 import transform.csv_as_enclosure_json as csv_as_enclosure_json
 from analyze_git_log import add_complexity_analysis, to_days
@@ -24,27 +23,20 @@ from process_git_log import get_loc, add_loc, read_locs
 
 HOME = str(Path.home())
 PROJECT = 'Spacy'
-PROJECT_STOPWORDS = set()
 STATS_PATH = f'{HOME}/.stats/{PROJECT}'
 PREFIX = f'/home/lars/projects/{PROJECT}/'
 CONTROL_WIDTH = 420
 PLOT_WIDTH = 1200
 PLOT_HEIGHT = 900
 WORDCLOUD_IDX = 2
-COMPLEXITY_TREND_IDX = 1
 COLUMNS = [
     'revisions', 'loc', 'complexity', 'mean_complexity', 'complexity_max',
     'complexity_sd', 'soc', 'churn'
 ]
-COMPLEXITY_MEASURES = [
-    'lines', 'complexity', 'mean_complexity', 'complexity_sd', 'churn'
-]
-COMPLEXITY_X = ['revisions', 'date']
 CIRC_PACK_CRITERIA = [
     'soc', 'mean_complexity', 'complexity', 'complexity_sd', 'revisions',
     'author', 'age', 'churn'
 ]
-DATE_FORMAT = '%Y-%m-%d'
 
 DB_PATH = "cache.db"
 
@@ -75,7 +67,7 @@ class SQL:
     def add_project(self, project_name: str):
         self._connect()
         self._cursor.execute(
-            f'CREATE TABLE IF NOT EXISTS {project_name}(start INTEGER NOT NULL, end INTEGER NOT NULL, stats JSON NOT NULL, couplings JSON NOT NULL)'
+            f'CREATE TABLE IF NOT EXISTS {project_name}(start INTEGER NOT NULL, end INTEGER NOT NULL, stats JSON NOT NULL)'
         )
         is_present = self._cursor.execute(
             f'SELECT project FROM projects WHERE project = ?',
@@ -87,8 +79,7 @@ class SQL:
                                  (project_name, ))
         self._disconnect()
 
-    def store_stats(self, project_name: str, start: int, end: int, stats,
-                    couplings):
+    def store_stats(self, project_name: str, start: int, end: int, stats):
         self._connect()
         is_present = self._cursor.execute(
             f'SELECT start, end FROM {project_name} WHERE start = ? AND end = ?',
@@ -99,55 +90,17 @@ class SQL:
             )
             return
 
-        cmd = f'INSERT INTO {project_name}(start, end, stats, couplings) VALUES(?,?,?,?)'
-        self._cursor.execute(
-            cmd, (start, end, json.dumps(stats), json.dumps(couplings)))
+        cmd = f'INSERT INTO {project_name}(start, end, stats) VALUES(?,?,?,?)'
+        self._cursor.execute(cmd, (start, end, json.dumps(stats)))
         self._disconnect()
 
     def read_stats(self, project_name: str):
         self._connect()
         stat_rows = self._cursor.execute(
-            f'SELECT start, end, stats, couplings FROM {project_name}'
-        ).fetchall()
+            f'SELECT start, end, stats FROM {project_name}').fetchall()
         stats = {tuple(row[0:2]): json.loads(row[2]) for row in stat_rows}
-        couplings = {tuple(row[0:2]): json.loads(row[3]) for row in stat_rows}
         self._disconnect()
-        return stats, couplings
-
-
-def wordcloud_file(end: str, period: timedelta):
-    return f'{STATS_PATH}/wordcloud_{end}_{to_days(period)}.png'
-
-
-def generate_wordcloud(git_log: GitLog, end: datetime, period: timedelta):
-    text = ' '.join(git_log.commit_msg(begin=end - period,
-                                       end=end)).replace("'", "")
-    wordcloud = WordCloud(stopwords=STOPWORDS | PROJECT_STOPWORDS,
-                          background_color='white')
-    wordcloud.generate(text)
-    wordcloud.to_file(
-        wordcloud_file(end=end.strftime(DATE_FORMAT), period=period))
-
-
-def get_workcloud_plot(end: datetime, period: timedelta):
-    wordcloud = figure(x_range=(0, 1),
-                       y_range=(0, 1),
-                       plot_width=PLOT_WIDTH,
-                       plot_height=250,
-                       tools='')
-    wordcloud.toolbar.logo = None
-    wordcloud.toolbar_location = None
-    wordcloud.xaxis.visible = None
-    wordcloud.yaxis.visible = None
-    wordcloud.xgrid.grid_line_color = None
-    wordcloud.ygrid.grid_line_color = None
-    wordcloud.outline_line_alpha = 0
-    wordcloud.image_url(url=[
-        f'crimescene/static/wordcloud_{end.strftime(DATE_FORMAT)}_{to_days(period)}.png'
-    ],
-                        x=0,
-                        y=1)
-    return wordcloud
+        return stats
 
 
 def get_age(stats, inverse=False):
@@ -171,23 +124,25 @@ class App:
     def __init__(self) -> None:
         self.git_log = GitLog.from_dir(PREFIX)
         self.selected = []
-        self.complexity_trend = []
         self.db = SQL()
         self.db.add_project(project_name=PROJECT)
-        stats, couplings = self.db.read_stats(project_name=PROJECT)
+        stats = self.db.read_stats(project_name=PROJECT)
         self.stats = stats
-        self.couplings = couplings
         self.start_loc = 0
         self.summary = Div(text='', width=CONTROL_WIDTH, height=100)
 
         today = datetime.now(tz=timezone.utc)
         period_start = today - timedelta(days=800)
+        self.file_analysis = FileAnalysis(git_log=self.git_log,
+                                          selected_file='',
+                                          begin=period_start,
+                                          end=today,
+                                          width=2 * CONTROL_WIDTH,
+                                          height=CONTROL_WIDTH)
 
         self.source = ColumnDataSource(
             data=dict(x=[], y=[], module=[], revisions=[], size=[]))
         self.source.selected.on_change('indices', self.update_selected)  # pylint: disable=no-member
-        self.complexity_analysis_source = ColumnDataSource(
-            data=dict(x=[], y=[], sha=[]))
         self.x_menu = Select(title='X-Axis', value=COLUMNS[3], options=COLUMNS)
         self.x_menu.on_change('value', self.update_table)
 
@@ -201,17 +156,6 @@ class App:
                                       value=CIRC_PACK_CRITERIA[1],
                                       options=CIRC_PACK_CRITERIA)
         self.circ_pack_color.on_change('value', self.update_circ_pack_color)
-
-        self.complexity_x = Select(title='Complexity X',
-                                   value=COMPLEXITY_X[0],
-                                   options=COMPLEXITY_X)
-        self.complexity_x.on_change('value', self.update_detailed_analysis)
-
-        self.complexity_measures = Select(title='Complexity Measure',
-                                          value=COMPLEXITY_MEASURES[2],
-                                          options=COMPLEXITY_MEASURES)
-        self.complexity_measures.on_change('value',
-                                           self.update_detailed_analysis)
 
         self.range_slider = DateRangeSlider(
             start=self.git_log.first_commit_date(),
@@ -231,11 +175,10 @@ class App:
         self.minus_button = Button(label='-', button_type='default', width=50)
         self.minus_button.on_click(self.decrease_dates)
 
-        generate_wordcloud(git_log=self.git_log,
-                           end=self.date_slider_value(),
-                           period=self.period_length())
-        wordcloud = get_workcloud_plot(end=self.date_slider_value(),
-                                       period=self.period_length())
+        wordcloud = get_new_workcloud_plot(git_log=self.git_log,
+                                           end=self.date_slider_value(),
+                                           period=self.period_length(),
+                                           width=PLOT_WIDTH)
         self.update_stats(period_start=period_start, period_end=today)
         self.update_source()
         self.circular_package = self.get_circular_package()
@@ -290,16 +233,16 @@ class App:
     def get_stats(self):
         return self.stats[self.range_slider.value]
 
-    def get_couplings(self, module):
-        return self.couplings[self.range_slider.value][module]
-
     def get_circ_color_data(self, value):
         if value == 'soc' and self.selected:
 
             selected_file = self.get_selected_file()
+            begin, end = self.get_period_as_datetime()
+            couplings, _ = self.git_log.get_couplings(filename=selected_file,
+                                                      begin=begin,
+                                                      end=end)
 
             def get_value(name):
-                couplings = self.get_couplings(selected_file)
                 return 2 + 2 * couplings[
                     name] if name in couplings else 1 if name == selected_file else 0
 
@@ -314,8 +257,6 @@ class App:
                 set(
                     get_main_author(module, self.get_stats())
                     for module in self.get_stats()))
-            print(f'INDEXED {indexed_main_authors}')
-            print(f'MA {main_authors}')
 
             return {
                 module: 3 * indexed_main_authors.index(main_authors[module])
@@ -385,8 +326,8 @@ class App:
             return
         t0 = time.time()
         t1 = time.time()
-        stats, couplings = self.git_log.get_revisions(begin=period_start,
-                                                      end=period_end)
+        stats, _ = self.git_log.get_revisions(begin=period_start,
+                                              end=period_end)
         self.start_loc = sum(
             read_locs(
                 get_loc(root=PREFIX,
@@ -394,7 +335,6 @@ class App:
         print(f'START LOC {self.start_loc}')
         t2 = time.time()
         self.stats[self.range_slider.value] = stats
-        self.couplings[self.range_slider.value] = couplings
         t3 = time.time()
         locs = get_loc(root=PREFIX, before=period_end.strftime(DATE_FORMAT))
         add_loc(self.get_stats(), locs)
@@ -412,15 +352,13 @@ class App:
         self.db.store_stats(project_name=PROJECT,
                             start=self.range_slider.value[0],
                             end=self.range_slider.value[1],
-                            stats=stats,
-                            couplings=couplings)
+                            stats=stats)
 
     def update_wordcloud(self):
-        generate_wordcloud(git_log=self.git_log,
-                           end=self.date_slider_value(),
-                           period=self.period_length())
-        wordcloud = get_workcloud_plot(end=self.date_slider_value(),
-                                       period=self.period_length())
+        wordcloud = get_new_workcloud_plot(git_log=self.git_log,
+                                           end=self.date_slider_value(),
+                                           period=self.period_length(),
+                                           width=PLOT_WIDTH)
         self.layout.children[1].children[0].children[WORDCLOUD_IDX] = wordcloud  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
     def get_period_as_datetime(self):
@@ -501,15 +439,6 @@ class App:
                    if t == datetime.fromtimestamp(churn['timestamp'],
                                                   tz=timezone.utc).date())
 
-    def get_churn_for_file(self, filename, t, key):
-        idx = 3 if key == 'added_lines' else 4
-        period_start, period_end = self.get_period_as_datetime()
-        return sum([
-            churn[idx] for churn in self.git_log.get_churn_for(
-                filename=filename, begin=period_start, end=period_end)
-            if t == churn[1].date()
-        ])
-
     def get_time_axis(self):
         start_date = ms_to_datetime(self.range_slider.value[0])
         end_date = self.date_slider_value()
@@ -577,178 +506,6 @@ class App:
     def get_selected_file(self):
         return self.source.data['module'][self.selected[0]]
 
-    def update_complexity_trend(self):
-        selected_file = self.get_selected_file()
-        self.complexity_trend = compute_complexity_trend(
-            PREFIX, selected_file,
-            (self.git_log.first_commit_sha(), self.git_log.last_commit_sha()))
-
-    def display_complexity_trend(self):
-        selected_file = self.get_selected_file()
-        kw = dict(
-            title=f'Complexity Trend: {selected_file}',
-            tooltips=[
-                ('sha', '@sha'),
-                ('msg', '@commit_msg'),
-                ('date', '@date'),
-                #   ('complexity', '@complexity'),
-                #   ('mean_complexity', '@mean_complexity'),
-                #   ('complexity_sd', '@complexity_sd'),
-                #   ('added_lines', '@added_lines'),
-                #   ('removed_lines', '@removed_lines'),
-            ],
-            x_axis_label=self.complexity_x.value,
-            y_axis_label=self.complexity_measures.value,
-            x_axis_type='linear'
-            if self.complexity_x.value == COMPLEXITY_X[0] else 'datetime')
-
-        p = figure(plot_height=600,
-                   plot_width=800,
-                   tools='pan,box_zoom,hover,reset',
-                   **kw)
-        p.toolbar.logo = None
-        x = []
-        x0 = []
-        churn = []
-        measure = []
-        if self.complexity_measures.value == 'churn':
-            period_start, period_end = self.get_period_as_datetime()
-            churn = self.git_log.get_churn_for(filename=selected_file,
-                                               begin=period_start,
-                                               end=period_end)
-            revs = [sha for sha, _, _, _, _ in churn]
-            measure = [0 for _ in revs]
-            if self.complexity_x.value == COMPLEXITY_X[0]:
-                x = list(range(len(revs)))
-                p.xaxis.ticker = x
-                p.xaxis.major_label_overrides = dict(enumerate(revs))
-            else:
-                x = [time for _, time, _, _, _ in churn]
-            x0 = [time for _, time, _, _, _ in churn]
-        else:
-            measure = [
-                row[1 +
-                    COMPLEXITY_MEASURES.index(self.complexity_measures.value)]
-                for row in self.complexity_trend
-            ]
-            revs = [row[0] for row in self.complexity_trend]
-            x0 = [
-                datetime.fromtimestamp(int(row[5]))
-                for row in self.complexity_trend
-            ]
-            if self.complexity_x.value == COMPLEXITY_X[0]:
-                x = list(range(len(revs)))
-                p.xaxis.ticker = x
-                p.xaxis.major_label_overrides = dict(enumerate(revs))
-            else:
-                x = [
-                    datetime.fromtimestamp(int(row[5]))
-                    for row in self.complexity_trend
-                ]
-
-        added = []
-        for t in x0:
-            # if 'linearBlockOperator' in selected_file:
-            #     print(f'{t}:')
-            added.append(
-                self.get_churn_for_file(filename=selected_file,
-                                        t=t.date(),
-                                        key='added_lines'))
-        #     self.get_churn_for_file(filename=selected_file,
-        #                             t=t.date(),
-        #                             key='added_lines') for t in x0
-        # ]
-        removed = [
-            self.get_churn_for_file(filename=selected_file,
-                                    t=t.date(),
-                                    key='removed_lines') for t in x0
-        ]
-        msgs = [msg for _, _, msg, _, _ in churn
-                ] if self.complexity_measures.value == 'churn' else [
-                    row[6] for row in self.complexity_trend
-                ]
-        print(f'MSGS {msgs}')
-        self.complexity_analysis_source.data = dict(
-            x=x,
-            y=measure,
-            sha=revs,
-            commit_msg=msgs,
-            # date=[
-            #     datetime.fromtimestamp(int(row[5]),
-            #                            tz=timezone.utc).strftime(DATE_FORMAT)
-            #     for row in self.complexity_trend
-            # ],
-            # complexity=[
-            #     row[1 + COMPLEXITY_MEASURES.index('complexity')]
-            #     for row in self.complexity_trend
-            # ],
-            # mean_complexity=[
-            #     row[1 + COMPLEXITY_MEASURES.index('mean_complexity')]
-            #     for row in self.complexity_trend
-            # ],
-            # complexity_sd=[
-            #     row[1 + COMPLEXITY_MEASURES.index('complexity_sd')]
-            #     for row in self.complexity_trend
-            # ],
-            added_lines=added,
-            removed_lines=removed)
-
-        if self.complexity_measures.value == 'churn':
-            p.line(x='x',
-                   y='removed_lines',
-                   source=self.complexity_analysis_source,
-                   line_width=3,
-                   line_color='blue')
-            p.circle(x='x',
-                     y='removed_lines',
-                     source=self.complexity_analysis_source,
-                     color='blue',
-                     size=10)
-            p.line(x='x',
-                   y='added_lines',
-                   source=self.complexity_analysis_source,
-                   line_width=3,
-                   line_color='orange')
-            p.circle(x='x',
-                     y='added_lines',
-                     source=self.complexity_analysis_source,
-                     color='orange',
-                     size=10)
-        else:
-            p.line(x='x',
-                   y='y',
-                   source=self.complexity_analysis_source,
-                   line_width=3,
-                   line_color='orange')
-            p.circle(x='x',
-                     y='y',
-                     source=self.complexity_analysis_source,
-                     color='orange',
-                     size=10)
-        return p
-
-    def create_complexity_trend(self):
-        self.update_complexity_trend()
-        return self.display_complexity_trend()
-
-    def create_coupling_table(self):
-        coupling_table = ['Coupling: </br>']
-        reference = self.get_selected_file()
-        data = self.get_couplings(reference)
-        n_revisions = data['count']
-        coupled = []
-        for name, n_coupled in data.items():
-            if name == 'count':
-                continue
-            if n_coupled > 2 and n_coupled / n_revisions > 0.2:
-                coupled.append((name, n_coupled))
-        coupled = sorted(coupled, key=lambda x: x[1], reverse=True)
-        for name, n_coupled in coupled:
-            coupling_table.append(f'{name}: {n_coupled}/{n_revisions}')
-        return Div(text='</br>'.join(coupling_table),
-                   width=2 * CONTROL_WIDTH,
-                   height=CONTROL_WIDTH)
-
     def update_table(self, attr, old, new):
         self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
@@ -767,31 +524,22 @@ class App:
 
     def update_selected(self, attr, old, new):
         self.selected = new
+        if self.selected:
+            begin, end = self.get_period_as_datetime()
+            self.file_analysis.set_selected_file(
+                selected_file=self.get_selected_file(), begin=begin, end=end)
         if len(self.layout.children[1].children) == 3:  # pylint: disable=unsubscriptable-object
             if self.selected:
-                self.layout.children[1].children[2].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-                    COMPLEXITY_TREND_IDX] = self.create_complexity_trend()
-                self.layout.children[1].children[2].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-                    COMPLEXITY_TREND_IDX + 1] = self.create_coupling_table()
+                self.layout.children[1].children[  # pylint: disable=unsubscriptable-object
+                    2] = self.file_analysis.get_plot()
             else:
                 del self.layout.children[1].children[2]  # pylint: disable=unsupported-delete-operation,unsubscriptable-object
         if len(self.layout.children[1].children) == 2 and self.selected:  # pylint: disable=unsubscriptable-object
             self.layout.children[1].children.append(  # pylint: disable=no-member,unsubscriptable-object
-                column(
-                    row(self.complexity_measures,
-                        self.complexity_x,
-                        align=Align.center),  # pylint: disable=no-member
-                    self.create_complexity_trend(),
-                    self.create_coupling_table()))
+                self.file_analysis.get_plot())
         if self.circ_pack_color.value == 'soc':
             self.update_circ_pack_color('value', '',
                                         self.circ_pack_color.value)
-
-    def update_detailed_analysis(self, attr, old, new):
-        if len(self.layout.children[1].children) < 3:  # pylint: disable=unsubscriptable-object
-            return
-        self.layout.children[1].children[2].children[  # pylint: disable=unsubscriptable-object
-            COMPLEXITY_TREND_IDX] = self.display_complexity_trend()
 
 
 MIN_DATUM = 0.0
