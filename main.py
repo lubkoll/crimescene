@@ -1,7 +1,9 @@
+import re
 from get_wordcloud import get_new_workcloud_plot
-from git_log import GitLog, DATE_FORMAT
+from git_log import GitLog
 from file_analysis import FileAnalysis
 from get_db import SQL
+from util import to_days, DATE_FORMAT
 import os
 import sys
 import time
@@ -15,8 +17,7 @@ from bokeh.plotting import curdoc, figure
 from pathlib import Path
 
 import transform.csv_as_enclosure_json as csv_as_enclosure_json
-from analyze_git_log import add_complexity_analysis, to_days
-from circular_package import CircularPackage, get_main_author
+from circular_package import CircularPackage
 from color_map import get_colors
 from process_git_log import get_loc, add_loc, read_locs
 
@@ -30,12 +31,26 @@ PLOT_HEIGHT = 900
 WORDCLOUD_IDX = 2
 COLUMNS = [
     'revisions', 'loc', 'complexity', 'mean_complexity', 'complexity_max',
-    'complexity_sd', 'soc', 'churn'
+    'complexity_sd', 'soc', 'churn', 'churn/line'
 ]
 CIRC_PACK_CRITERIA = [
     'soc', 'mean_complexity', 'complexity', 'complexity_sd', 'revisions',
-    'author', 'age', 'churn'
+    'author', 'age', 'churn', 'churn/line'
 ]
+LEVELS = ['file', 'module', 'test']
+MODULES = [('Spacy/Adapter/.*', 'Adapter'),
+           ('Spacy/Adaptivity/.*', 'Adaptivity'),
+           ('Spacy/Algorithm/.*', 'Algorithm'), ('Spacy/Spaces/.*', 'Spaces'),
+           ('Spacy/Util/.*', 'Util'), (r'Spacy/\S+\.\w+', 'Spacy'),
+           ('Test/.*', 'Test')]
+
+
+def module_map(name: str):
+    for module_regex, module in MODULES:
+        match = re.match(module_regex, name)
+        if match:
+            return module
+    return 'None'
 
 
 def get_age(stats, inverse=False):
@@ -63,11 +78,14 @@ class App:
         self.db.add_project(project_name=PROJECT)
         stats = self.db.read_stats(project_name=PROJECT)
         self.stats = stats
+        # self.module_stats = get_module_stats(stats)
         self.start_loc = 0
         self.summary = Div(text='', width=CONTROL_WIDTH, height=100)
 
         today = datetime.now(tz=timezone.utc)
         period_start = today - timedelta(days=800)
+        self.module_stats = self.git_log.get_revisions_for_module(
+            begin=period_start, end=today, module_map=module_map)
         self.file_analysis = FileAnalysis(git_log=self.git_log,
                                           selected_file='',
                                           begin=period_start,
@@ -86,6 +104,12 @@ class App:
 
         self.color = Select(title='Color', value=COLUMNS[6], options=COLUMNS)
         self.color.on_change('value', self.update_table)
+
+        self.level = LEVELS[0]
+        self.level_menu = Select(title='Level',
+                                 value=LEVELS[0],
+                                 options=LEVELS)
+        self.level_menu.on_change('value', self.update_level)
 
         self.circ_pack_color = Select(title='Overview Color',
                                       value=CIRC_PACK_CRITERIA[1],
@@ -124,6 +148,7 @@ class App:
                           self.y_menu,
                           self.color,
                           self.circ_pack_color,
+                          self.level_menu,
                           width=CONTROL_WIDTH)
         self.layout = column(
             row(self.range_slider, self.range_button),
@@ -185,13 +210,12 @@ class App:
 
         if value == 'author':
             main_authors = {
-                module: get_main_author(module, self.get_stats())
+                module: list(
+                    self.git_log.get_main_authors(filename=module,
+                                                  max_authors=1)[0].keys())[0]
                 for module in self.get_stats()
             }
-            indexed_main_authors = list(
-                set(
-                    get_main_author(module, self.get_stats())
-                    for module in self.get_stats()))
+            indexed_main_authors = list(set(main_authors.values()))
 
             return {
                 module: 3 * indexed_main_authors.index(main_authors[module])
@@ -208,10 +232,20 @@ class App:
                 for name, data in self.get_stats().items()
             }
 
+        if value == 'churn/line':
+            return {
+                name: sum(churn['added_lines'] + churn['removed_lines']
+                          for churn in data['churn']) / data['lines']
+                for name, data in self.get_stats().items()
+            }
+
         return {
             module: data[value]
             for module, data in self.get_stats().items()
         }
+
+    def update_level(self, attr, old, new):
+        pass
 
     def update_circ_pack_color(self, attr, old, new):
         self.circular_package.update_package(self.get_circ_color_data(new),
@@ -259,10 +293,10 @@ class App:
                         root=PREFIX,
                         before=period_start.strftime(DATE_FORMAT))).values())
             return
-        t0 = time.time()
         t1 = time.time()
-        stats, _ = self.git_log.get_revisions(begin=period_start,
-                                              end=period_end)
+        stats = self.git_log.get_revisions(begin=period_start, end=period_end)
+        self.module_stats = self.git_log.get_revisions_for_module(
+            begin=period_start, end=period_end, module_map=module_map)
         self.start_loc = sum(
             read_locs(
                 get_loc(root=PREFIX,
@@ -274,16 +308,15 @@ class App:
         locs = get_loc(root=PREFIX, before=period_end.strftime(DATE_FORMAT))
         add_loc(self.get_stats(), locs)
         t4 = time.time()
-        add_complexity_analysis(root=PREFIX,
-                                end=period_end.strftime(DATE_FORMAT),
-                                stats=self.get_stats())
+        self.git_log.add_complexity_analysis(
+            end=period_end.strftime(DATE_FORMAT), stats=self.get_stats())
 
         t5 = time.time()
         self.add_repo_main_authors()
         t6 = time.time()
         self.update_summary()
         t7 = time.time()
-        print(f'{t1-t0}, {t2-t1}, {t3-t2}, {t4-t3}, {t5-t4}, {t6-t5}, {t7-t6}')
+        print(f'{t2-t1}, {t3-t2}, {t4-t3}, {t5-t4}, {t6-t5}, {t7-t6}')
         self.db.store_stats(project_name=PROJECT,
                             start=self.range_slider.value[0],
                             end=self.range_slider.value[1],
@@ -319,9 +352,20 @@ class App:
                 for churn in data['churn'])
             for data in self.get_stats().values()
         ]
-        color_data = churn if self.color.value == 'churn' else [
-            data[self.color.value] for data in self.get_stats().values()
+        churn_per_line = [
+            sum(churn['added_lines'] + churn['removed_lines']
+                for churn in data['churn']) / data['lines']
+            for data in self.get_stats().values()
         ]
+        color_data = []
+        if self.color.value == 'churn':
+            color_data = churn
+        elif self.color.value == 'churn/line':
+            color_data = churn_per_line
+        else:
+            color_data = [
+                data[self.color.value] for data in self.get_stats().values()
+            ]
 
         def get_author(author, ratio):
             return f'{author} ({round(ratio,2)})'
@@ -366,7 +410,8 @@ class App:
                 f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
                 for data in self.get_stats().values()
             ],
-            churn=churn)
+            churn=churn,
+            churn_per_line=churn_per_line)
 
     def get_churn(self, t, key):
         return sum(churn[key] for data in self.get_stats().values()
@@ -404,6 +449,10 @@ class App:
         self.update_source()
         x_title = self.x_menu.value
         y_title = self.y_menu.value
+        if x_title == 'churn/line':
+            x_title = 'churn_per_line'
+        if y_title == 'churn/line':
+            y_title = 'churn_per_line'
 
         kw = dict(
             title="",

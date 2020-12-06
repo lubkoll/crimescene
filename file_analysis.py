@@ -9,7 +9,8 @@ from bokeh.models import ColumnDataSource, Div, Select
 from bokeh.plotting import figure
 
 COMPLEXITY_MEASURES = [
-    'lines', 'complexity', 'mean_complexity', 'complexity_sd', 'churn'
+    'lines', 'complexity', 'mean_complexity', 'complexity_sd', 'churn',
+    'churn/line'
 ]
 COMPLEXITY_X = ['revisions', 'date']
 
@@ -96,6 +97,7 @@ class FileAnalysis:
                       ('msg', '@commit_msg'),
                       ('date', '@date'),
                       ('author', '@author'),
+                      ('lines', '@lines'),
                       ('complexity', '@complexity'),
                       ('mean_complexity', '@mean_complexity'),
                       ('complexity_sd', '@complexity_sd'),
@@ -116,7 +118,7 @@ class FileAnalysis:
         x0 = []
         churn = []
         measure = []
-        if self.complexity_measures.value == 'churn':
+        if self.complexity_measures.value in ['churn', 'churn/line']:
             churn = self._git_log.get_churn_for(filename=self._selected_file,
                                                 begin=self._begin,
                                                 end=self._end)
@@ -169,6 +171,12 @@ class FileAnalysis:
                                     t=t.date(),
                                     key='removed_lines') for t in x0
         ]
+        lines = [
+            row[1 + COMPLEXITY_MEASURES.index('lines')]
+            for row in self._complexity_trend
+        ]
+        added_per_line = [x / y for x, y in zip(added, lines)]
+        removed_per_line = [x / y for x, y in zip(removed, lines)]
         msgs = [
             self._git_log.get_commit_from_sha(sha).msg for sha, _, _ in churn
         ] if self.complexity_measures.value == 'churn' else [
@@ -193,6 +201,7 @@ class FileAnalysis:
                     row[0]).creation_time.strftime(DATE_FORMAT)
                 for row in self._complexity_trend
             ],
+            lines=lines,
             complexity=[
                 row[1 + COMPLEXITY_MEASURES.index('complexity')]
                 for row in self._complexity_trend
@@ -206,7 +215,9 @@ class FileAnalysis:
                 for row in self._complexity_trend
             ],
             added_lines=added,
-            removed_lines=removed)
+            removed_lines=removed,
+            added_per_line=added_per_line,
+            removed_per_line=removed_per_line)
 
         if self.complexity_measures.value == 'churn':
             p.line(x='x',
@@ -226,6 +237,27 @@ class FileAnalysis:
                    line_color='orange')
             p.circle(x='x',
                      y='added_lines',
+                     source=self.complexity_analysis_source,
+                     color='orange',
+                     size=10)
+        elif self.complexity_measures.value == 'churn/line':
+            p.line(x='x',
+                   y='removed_per_line',
+                   source=self.complexity_analysis_source,
+                   line_width=3,
+                   line_color='blue')
+            p.circle(x='x',
+                     y='removed_per_line',
+                     source=self.complexity_analysis_source,
+                     color='blue',
+                     size=10)
+            p.line(x='x',
+                   y='added_per_line',
+                   source=self.complexity_analysis_source,
+                   line_width=3,
+                   line_color='orange')
+            p.circle(x='x',
+                     y='added_per_line',
                      source=self.complexity_analysis_source,
                      color='orange',
                      size=10)

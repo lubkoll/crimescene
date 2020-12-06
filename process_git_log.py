@@ -1,15 +1,7 @@
-from time import timezone
-from analyze_git_log import DATE_FORMAT
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import date, datetime, timezone, tzinfo
 import time
 import re
 import subprocess
-
-
-def _as_rev_range(start, end):
-    return start + '..' + end
 
 
 def _run_cmd(root, args):

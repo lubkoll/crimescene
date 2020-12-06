@@ -53,7 +53,7 @@ class SQL:
             )
             return
 
-        cmd = f'INSERT INTO {project_name}(start, end, stats) VALUES(?,?,?,?)'
+        cmd = f'INSERT INTO {project_name}(start, end, stats) VALUES(?,?,?)'
         self._cursor.execute(cmd, (start, end, json.dumps(stats)))
         self._disconnect()
 

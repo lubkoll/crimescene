@@ -1,13 +1,13 @@
 from collections import defaultdict
+import os
 import re
 import subprocess
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Set
 import miner.complexity_calculations as complexity_calculations
-
-DATE_FORMAT = '%Y-%m-%d'
+from util import DATE_FORMAT
 
 
 class DescriptiveStats:
@@ -357,7 +357,7 @@ class GitLog:
                                 data['count'] += 1
                                 if change.old_filename:
                                     data['names'].add(change.old_filename)
-                                    found = True
+                                found = True
 
                         if not found:
                             couplings[change.filename]['names'].add(
@@ -391,16 +391,6 @@ class GitLog:
                 timestamp(),
                 'churn': []
             })
-        couplings = defaultdict(lambda: defaultdict(int))
-
-        def update_couplings(names_in_commit):
-            soc = len(names_in_commit)
-            for name in names_in_commit:
-                revisions[name]['soc'] += soc
-                for other_name in names_in_commit:
-                    if name != other_name:
-                        couplings[name][other_name] += 1
-                couplings[name]['count'] += 1
 
         def op(commit):
             for change in commit.changes:
@@ -418,7 +408,10 @@ class GitLog:
                     'removed_lines':
                     change.removed_lines
                 })
-            update_couplings([change.filename for change in commit.changes])
+            names_in_commit = [change.filename for change in commit.changes]
+            soc = len(names_in_commit) - 1
+            for name in names_in_commit:
+                revisions[name]['soc'] += soc
 
         # ForwardTraversal(git_log=self,
         #                  op=op,
@@ -431,7 +424,73 @@ class GitLog:
                 break
             op(commit)
 
-        return revisions, couplings
+        return revisions
+
+    def get_revisions_for_module(self, begin: datetime, end: datetime,
+                                 module_map):
+        '''
+            Does not trace renamings.
+        '''
+        revisions = defaultdict(
+            lambda: {
+                'revisions':
+                0,
+                'soc':
+                0,
+                'loc':
+                0,
+                'last_change':
+                datetime(year=2015, month=1, day=1, tzinfo=timezone.utc).
+                timestamp(),
+                'churn': [],
+                'lines':
+                0,
+                'complexity':
+                0.0,
+                'mean_complexity':
+                0.0,
+                'complexity_sd':
+                0.0,
+                'complexity_max':
+                0.0
+            })
+
+        def op(commit):
+            modules_in_commit = {
+                module_map(change.filename)
+                for change in commit.changes
+            }
+            for module in modules_in_commit:
+                revisions[module]['revisions'] += 1
+                revisions[module][
+                    'last_change'] = commit.creation_time.timestamp()
+
+                churn = {
+                    'timestamp': commit.creation_time.timestamp(),
+                    'added_lines': 0,
+                    'removed_lines': 0
+                }
+                for change in commit.changes:
+                    if module == module_map(change.filename):
+                        churn['added_lines'] += change.added_lines
+                        churn['removed_lines'] += change.removed_lines
+                revisions[module]['churn'].append(churn)
+            soc = len(modules_in_commit) - 1
+            for module in modules_in_commit:
+                revisions[module]['soc'] += soc
+
+        # ForwardTraversal(git_log=self,
+        #                  op=op,
+        #                  valid_cond=self._in_interval(begin, end))()
+
+        for commit in self._commits:
+            if begin > commit.creation_time:
+                continue
+            if end < commit.creation_time:
+                break
+            op(commit)
+
+        return revisions
 
     def get_authors(self, filename: str):
         added_lines = 0
@@ -503,3 +562,27 @@ class GitLog:
             round(stats.mean(), 2),
             round(stats.sd(), 2)
         ] for stats in complexity_trend]
+
+    def add_complexity_analysis(self, end: str, stats):
+        os.system(
+            f'cd {self.root} && git checkout `git rev-list -n 1 --before={end} master`'
+        )
+        try:
+            for filename in stats.keys():
+                with open(self.root + filename, "r") as file_to_calc:
+                    complexity_by_line = complexity_calculations.calculate_complexity_in(
+                        file_to_calc.read())
+                    d_stats = DescriptiveStats(filename, complexity_by_line)
+                    if not stats[filename]:
+                        print(f'MISSING: {filename}')
+                    stats[filename]['lines'] = d_stats.n_revs
+                    stats[filename]['complexity'] = d_stats.total
+                    stats[filename]['mean_complexity'] = round(
+                        d_stats.mean(), 2)
+                    stats[filename]['complexity_sd'] = round(d_stats.sd(), 2)
+                    stats[filename]['complexity_max'] = round(
+                        d_stats.max_value(), 2)
+        except Exception as exc:
+            print(f'Exc: {type(exc)}:{exc}')
+        os.system(f'cd {self.root} && git checkout master')
+        return stats
