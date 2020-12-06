@@ -335,56 +335,6 @@ class GitLog:
                           valid_cond=self._in_interval(begin=begin, end=end))()
         return list(reversed(churn))
 
-    def get_all_couplings(self, begin: datetime, end: datetime):
-        n_rev = 0
-        couplings = defaultdict(lambda: defaultdict(lambda: {
-            'count': 0,
-            'names': set()
-        }))
-
-        def op(commit):
-            nonlocal n_rev
-
-            for change in commit.changes:
-                for coupled in commit.changes:
-                    if change is coupled:
-                        continue
-                    found = False
-                    for data in couplings[change.filename].values():
-                        if coupled.filename in data['names']:
-                            data['count'] += 1
-                            if coupled.old_filename:
-                                data['names'].add(coupled.old_filename)
-                            found = True
-                    if not found:
-                        if couplings[change.filename][
-                                coupled.filename]['count'] == 0:
-                            couplings[change.filename][
-                                coupled.filename]['names'].add(
-                                    coupled.filename)
-                        couplings[change.filename][
-                            coupled.filename]['count'] += 1
-                        if coupled.old_filename:
-                            couplings[change.filename][
-                                coupled.filename]['names'].add(
-                                    coupled.old_filename)
-                if change.old_filename:
-                    couplings[change.old_filename] = couplings[change.filename]
-
-        BackwardTraversal(git_log=self,
-                          op=op,
-                          valid_cond=self._in_interval(begin=begin, end=end))()
-
-        couplings = {
-            name: {
-                coupled: data2['count']
-                for coupled, data2 in data.items()
-                if data2['count'] > 3  # and data2['count'] / n_rev > 0.2
-            }
-            for name, data in couplings.items()
-        }
-        return couplings
-
     def get_couplings(self, filename: str, begin: datetime, end: datetime):
         n_rev = 0
         couplings = defaultdict(lambda: {'count': 0, 'names': set()})
