@@ -258,6 +258,32 @@ class BackwardTraversal:
         self._iter(commit=commit, visited=visited)
 
 
+def get_files_in_commit(root: str, sha: str):
+    files = _run_cmd(root,
+                     ['git', 'ls-tree', '-r', '--name-only', sha]).split('\n')
+    to_remove = [file for file in files if file.endswith('.enc')]
+    for file in to_remove:
+        files.remove(file)
+    return files
+
+
+def get_lines_in_sha(root: str, sha: str):
+    files = get_files_in_commit(root=root, sha=sha)
+    return sum(
+        complexity_calculations.compute_lines(
+            _run_cmd(root, ['git', 'show', f'{sha}:{file}']))
+        for file in files)
+
+
+def get_lines_before(root: str, before: datetime):
+    sha = _run_cmd(root, [
+        'git', 'rev-list', '-1', "--pretty=format:'%h'",
+        f'--before={before.strftime(DATE_FORMAT)}', 'master'
+    ]).split('\n')[1].replace("'", "")
+    print(f'get lines for {sha}')
+    return get_lines_in_sha(root=root, sha=sha)
+
+
 class GitLog:
     def __init__(self, root: str, commits) -> None:
         self.root = root

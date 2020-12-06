@@ -1,6 +1,6 @@
 import re
 from get_wordcloud import get_new_workcloud_plot
-from git_log import GitLog
+from git_log import GitLog, get_lines_before
 from file_analysis import FileAnalysis
 from get_db import SQL
 from util import to_days, DATE_FORMAT
@@ -78,7 +78,6 @@ class App:
         self.db.add_project(project_name=PROJECT)
         stats = self.db.read_stats(project_name=PROJECT)
         self.stats = stats
-        # self.module_stats = get_module_stats(stats)
         self.start_loc = 0
         self.summary = Div(text='', width=CONTROL_WIDTH, height=100)
 
@@ -245,7 +244,7 @@ class App:
         }
 
     def update_level(self, attr, old, new):
-        pass
+        self.update_source()
 
     def update_circ_pack_color(self, attr, old, new):
         self.circular_package.update_package(self.get_circ_color_data(new),
@@ -287,6 +286,7 @@ class App:
     def update_stats(self, period_start: datetime, period_end: datetime):
         if self.range_slider.value in self.stats:
             self.update_summary()
+            #            self.start_loc = get_lines_before(root=PREFIX, before=period_start)
             self.start_loc = sum(
                 read_locs(
                     get_loc(
@@ -297,6 +297,7 @@ class App:
         stats = self.git_log.get_revisions(begin=period_start, end=period_end)
         self.module_stats = self.git_log.get_revisions_for_module(
             begin=period_start, end=period_end, module_map=module_map)
+        #        self.start_loc = get_lines_before(root=PREFIX, before=period_start)
         self.start_loc = sum(
             read_locs(
                 get_loc(root=PREFIX,
@@ -347,6 +348,12 @@ class App:
             2] = self.create_churn_plot()
 
     def update_source(self):
+        if self.level_menu.value == 'module':
+            self.update_source_for_module()
+        else:
+            self.update_source_for_file()
+
+    def update_source_for_file(self):
         churn = [
             sum(churn['added_lines'] + churn['removed_lines']
                 for churn in data['churn'])
@@ -409,6 +416,49 @@ class App:
             churn_overview=[
                 f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
                 for data in self.get_stats().values()
+            ],
+            churn=churn,
+            churn_per_line=churn_per_line)
+
+    def update_source_for_module(self):
+        stats = self.module_stats
+        churn = [
+            sum(churn['added_lines'] + churn['removed_lines']
+                for churn in data['churn']) for data in stats.values()
+        ]
+        churn_per_line = [
+            sum(churn['added_lines'] + churn['removed_lines']
+                for churn in data['churn'])  # / data['lines']
+            for data in stats.values()
+        ]
+        color_data = []
+        if self.color.value == 'churn':
+            color_data = churn
+        elif self.color.value == 'churn/line':
+            color_data = churn_per_line
+        else:
+            color_data = [data[self.color.value] for data in stats.values()]
+
+        self.source.data = dict(
+            module=list(stats.keys()),
+            loc=[data['loc'] for data in stats.values()],
+            revisions=[data['revisions'] for data in stats.values()],
+            size=[9 + 0.2 * float(data['loc']) for data in stats.values()],
+            lines=[data['lines'] for data in stats.values()],
+            complexity=[data['complexity'] for data in stats.values()],
+            mean_complexity=[
+                data['mean_complexity'] for data in stats.values()
+            ],
+            complexity_sd=[data['complexity_sd'] for data in stats.values()],
+            complexity_max=[data['complexity_max'] for data in stats.values()],
+            soc=[data['soc'] for data in stats.values()],
+            color=get_colors(color_data),
+            authors=['' for _ in stats],
+            n_authors=['' for _ in stats],
+            age=list(get_age(stats).values()),
+            churn_overview=[
+                f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
+                for data in stats.values()
             ],
             churn=churn,
             churn_per_line=churn_per_line)
