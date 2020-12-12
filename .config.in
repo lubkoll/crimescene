@@ -1,0 +1,7 @@
+{
+    "project": "your project",
+    "path": "path to your project",
+    "modules": {
+        "module in your project": "regex"       
+    }
+}

@@ -321,10 +321,6 @@ class GitLog:
                       commits=sorted(get_commit_list(get_full_log(root=dir)),
                                      key=lambda commit: commit.creation_time))
 
-    # def get_stats(self, begin: datetime, end: datetime):
-    #     stats = {}
-    #     return stats
-
     def get_churn(self):
         churn = defaultdict(list)
         for commit in self.commits:
@@ -518,22 +514,27 @@ class GitLog:
 
         return revisions
 
-    def get_authors(self, filename: str):
-        added_lines = 0
+    def get_authors(self, filename: str, module_map=None):
+        n_revs = 0
         authors = defaultdict(int)
         for commit in reversed(self._commits):
             for change in commit.changes:
-                if filename == change.filename:
-                    added_lines += change.added_lines
-                    authors[commit.author] += change.added_lines
+                change_name = module_map(
+                    change.filename) if module_map else change.filename
+                if filename == change_name:
+                    n_revs += 1
+                    authors[commit.author] += 1
                     if change.old_filename:
                         filename = change.old_filename
         for author in authors:
-            authors[author] = authors[author] / added_lines
+            authors[author] = authors[author] / n_revs
         return authors
 
-    def get_main_authors(self, filename: str, max_authors: int = 3):
-        authors = self.get_authors(filename=filename)
+    def get_main_authors(self,
+                         filename: str,
+                         max_authors: int = 3,
+                         module_map=None):
+        authors = self.get_authors(filename=filename, module_map=module_map)
         valid = sorted(authors.values(), reverse=True)
         n_authors = len(valid)
         if len(valid) > max_authors:
