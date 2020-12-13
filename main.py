@@ -1,10 +1,10 @@
 import json
 import re
 from get_wordcloud import get_new_workcloud_plot
-from git_log import GitLog
+from git_log import GitLog, get_files_in_commit, get_first_commit_date
 from file_analysis import FileAnalysis
 from get_db import SQL
-from util import to_days, DATE_FORMAT
+from util import ms_to_datetime, to_days, DATE_FORMAT
 import math
 import os
 import sys
@@ -30,11 +30,15 @@ PLOT_HEIGHT = 900
 WORDCLOUD_IDX = 2
 COLUMNS = [
     'revisions', 'loc', 'complexity', 'mean_complexity', 'complexity_max',
-    'complexity_sd', 'soc', 'churn', 'churn/line', 'age'
+    'complexity_sd', 'soc', 'churn', 'churn/line', 'age', 'proximity',
+    'mean_proximity', 'proximity_sd', 'proximity_max'
 ]
 CIRC_PACK_CRITERIA = [
     'soc', 'mean_complexity', 'complexity', 'complexity_sd', 'revisions',
     'author', 'age', 'churn', 'churn/line'
+]
+LONG_TERM_PLOT_CRITERIA = [
+    'revisions', 'lines', 'complexity', 'mean complexity', 'complexity sd'
 ]
 LEVELS = ['file', 'module']
 
@@ -73,10 +77,6 @@ def add_stats_for_module(module_stats, file_stats, module_map):
             module_stats[module].get('complexity_max', 0), data['complexity'])
     for data in module_stats.values():
         data['mean_complexity'] = data['complexity'] / data['lines']
-
-
-def ms_to_datetime(ms: float):
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
 class App:
@@ -122,6 +122,17 @@ class App:
                                  options=LEVELS)
         self.level_menu.on_change('value', self.update_level)
 
+        self.long_term_plot_menu = Select(title='Long Term Plot',
+                                          value='churn',
+                                          options=['churn', 'rising hotspot'])
+        self.long_term_plot_menu.on_change('value', self.update_long_term_plot)
+        self.long_term_plot_criterion = Select(
+            title='Long Term Plot Criterion',
+            value=LONG_TERM_PLOT_CRITERIA[0],
+            options=LONG_TERM_PLOT_CRITERIA)
+        self.long_term_plot_criterion.on_change('value',
+                                                self.update_long_term_plot)
+
         self.circ_pack_color = Select(title='Overview Color',
                                       value=CIRC_PACK_CRITERIA[1],
                                       options=CIRC_PACK_CRITERIA)
@@ -160,6 +171,8 @@ class App:
                           self.color,
                           self.circ_pack_color,
                           self.level_menu,
+                          self.long_term_plot_menu,
+                          self.long_term_plot_criterion,
                           width=CONTROL_WIDTH)
         self.layout = column(
             row(self.range_slider, self.range_button),
@@ -170,6 +183,10 @@ class App:
         )
         self.update_wordcloud()
         self.update_summary()
+
+    def update_long_term_plot(self, attr, old, new):
+        self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+            2] = self.create_churn_plot()
 
     def increase_dates(self):
         start, end = self.range_slider.value
@@ -245,8 +262,11 @@ class App:
 
         if value == 'churn/line':
             return {
-                name: sum(churn['added_lines'] + churn['removed_lines']
-                          for churn in data['churn']) / data['lines']
+                name: min(
+                    math.log(1 +
+                             sum(churn['added_lines'] + churn['removed_lines']
+                                 for churn in data['churn']) / data['lines']),
+                    2)
                 for name, data in self.get_stats().items()
             }
 
@@ -332,6 +352,9 @@ class App:
         self.git_log.add_complexity_analysis(
             end=period_end.strftime(DATE_FORMAT), stats=self.get_stats())
         t5 = time.time()
+        self.git_log.add_proximity_analysis(begin=period_start,
+                                            end=period_end,
+                                            stats=self.get_stats())
         self.add_repo_main_authors()
 
         add_stats_for_module(module_stats=self.module_stats,
@@ -391,7 +414,7 @@ class App:
         if self.color.value == 'churn':
             color_data = churn
         elif self.color.value == 'churn/line':
-            color_data = churn_per_line
+            color_data = [min(math.log(1 + val), 2) for val in churn_per_line]
         else:
             color_data = [
                 data[self.color.value] for data in self.get_stats().values()
@@ -422,6 +445,18 @@ class App:
             ],
             complexity_max=[
                 data['complexity_max'] for data in self.get_stats().values()
+            ],
+            proximity=[
+                data['proximity'] for data in self.get_stats().values()
+            ],
+            mean_proximity=[
+                data['mean_proximity'] for data in self.get_stats().values()
+            ],
+            proximity_sd=[
+                data['proximity_sd'] for data in self.get_stats().values()
+            ],
+            proximity_max=[
+                data['proximity_max'] for data in self.get_stats().values()
             ],
             soc=[data['soc'] for data in self.get_stats().values()],
             color=get_colors(color_data),
@@ -511,23 +546,96 @@ class App:
         return [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
 
     def create_churn_plot(self):
-        p = figure(title="Churn",
-                   x_axis_label='days',
-                   y_axis_label='loc',
+        p = figure(title=self.long_term_plot_menu.value,
+                   x_axis_label='date',
+                   y_axis_label='loc' if self.long_term_plot_menu.value
+                   == 'churn' else 'mean complexity',
                    x_axis_type='datetime',
                    plot_width=PLOT_WIDTH,
                    plot_height=PLOT_HEIGHT,
                    tools='pan,xwheel_zoom,reset')
-        x = self.get_time_axis()
-        added = [self.get_churn(t.date(), key='added_lines') for t in x]
-        removed = [self.get_churn(t.date(), key='removed_lines') for t in x]
-        locs = [self.start_loc]
-        for idx in range(len(x) - 1):
-            locs.append(locs[idx] + added[idx] - removed[idx])
-        p.line(x=x, y=added, color='orange', legend_label='added')
-        p.line(x=x, y=removed, color='blue', legend_label='removed')
-        p.line(x=x, y=locs, color='gray', legend_label='lines of code')
+        x = []
+        if self.long_term_plot_menu.value == 'churn':
+            x = self.get_time_axis()
+            added = [self.get_churn(t.date(), key='added_lines') for t in x]
+            removed = [
+                self.get_churn(t.date(), key='removed_lines') for t in x
+            ]
+            locs = [self.start_loc]
+            for idx in range(len(x) - 1):
+                locs.append(locs[idx] + added[idx] - removed[idx])
+            p.line(x=x, y=added, color='orange', legend_label='added')
+            p.line(x=x, y=removed, color='blue', legend_label='removed')
+            p.line(x=x, y=locs, color='gray', legend_label='lines of code')
+        if self.long_term_plot_menu.value == 'rising hotspot':
+            period_start, period_end = self.get_period_as_datetime()
+            complexity_trends = {
+                filename: self.git_log.compute_complexity_trend(
+                    filename=filename,
+                    begin=
+                    period_start,  #get_first_commit_date(root=self.__config['path']),
+                    end=period_end)
+                for filename in self.get_stats()
+            }
+            initial_complexities = []
+            final_complexities = []
+            stats_idx = 2
+            if self.long_term_plot_criterion.value == 'mean complexity':
+                stats_idx = 3
+            if self.long_term_plot_criterion.value == 'complexity sd':
+                stats_idx = 4
+            if self.long_term_plot_criterion.value == 'lines':
+                stats_idx = 1
+            for filename, data in complexity_trends.items():
+                if data:
+                    initial_complexities.append((filename, data[0][stats_idx]))
+                    final_complexities.append((filename, data[-1][stats_idx]))
+
+            initial_complexities.sort(key=lambda x: x[1], reverse=True)
+            final_complexities.sort(key=lambda x: x[1], reverse=True)
+            c0 = {
+                filename: idx
+                for idx, (filename, _) in enumerate(initial_complexities)
+            }
+            c1 = {
+                filename: idx
+                for idx, (filename, _) in enumerate(final_complexities)
+            }
+            rank_changes = [(filename, c0[filename] - c1[filename])
+                            for filename in c0]
+
+            rank_changes.sort(key=lambda x: x[1], reverse=True)
+            rank_changes = rank_changes[:10]
+            color_data = get_colors([rank for _, rank in rank_changes])
+            x = list(
+                set(
+                    self.git_log.get_commit_from_sha(row[0]).creation_time
+                    for filename, _ in rank_changes
+                    for row in complexity_trends[filename]))
+            x.sort()
+            for (filename, rank_change), color in zip(rank_changes,
+                                                      color_data):
+                trend = complexity_trends[filename]
+                previous = 0
+
+                def get_value(t):
+                    nonlocal previous
+                    for row in trend:
+                        if self.git_log.get_commit_from_sha(
+                                row[0]).creation_time == t:
+                            previous = row[stats_idx]
+                            return row[stats_idx]
+                    return previous
+
+                y = [get_value(t) for t in x]
+
+                p.line(x=x,
+                       y=y,
+                       color=color,
+                       legend_label=filename + ' ' + str(rank_change))
+
         p.legend.location = "top_left"
+        p.legend.click_policy = "hide"
         return p
 
     def create_figure(self):
@@ -546,7 +654,11 @@ class App:
                       ('complexity', '@complexity'),
                       ('mean_complexity', '@mean_complexity'),
                       ('complexity_sd', '@complexity_sd'),
-                      ('complexity_max', '@complexity_max'), ('SOC', '@soc'),
+                      ('complexity_max', '@complexity_max'),
+                      ('proximity', '@proximity'),
+                      ('mean_proximity', '@mean_proximity'),
+                      ('proximity_sd', '@proximity_sd'),
+                      ('proximity_max', '@proximity_max'), ('SOC', '@soc'),
                       ('authors', '@authors'), ('#authors', '@n_authors'),
                       ('age', '@age'), ('churn', '@churn_overview')],
             x_axis_label=x_title,

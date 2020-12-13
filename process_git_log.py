@@ -9,6 +9,31 @@ def _run_cmd(root, args):
                             cwd=root).communicate()[0].decode("utf-8")
 
 
+def _read_revisions_matching(root, git_arguments):
+    git_log = _run_cmd(root, git_arguments)
+    revs = []
+    # match a line like: d804759 Documented tree map visualizations
+    # ignore everything except the commit number:
+    rev_expr = re.compile(r'([^\s]+)')
+    for line in git_log.split("\n"):
+        m = rev_expr.search(line)
+        if m:
+            revs.append(m.group(1))
+    return revs[::-1]
+
+
+def read_revs(root: str, rev_start, rev_end):
+    """ Returns a list of all commits in the given range.
+	"""
+    rev_range = rev_start + '..' + rev_end
+    return _read_revisions_matching(
+        root, git_arguments=['git', 'log', rev_range, '--oneline'])
+
+
+def read_diff_for(root, rev1, rev2):
+    return _run_cmd(root, ['git', 'diff', rev1, rev2])
+
+
 def get_log(root: str, after: str, before: str):
     return _run_cmd(root, [
         'git', 'log', "--pretty=format:'[%h] %aN %cd %s'", '--date=short',

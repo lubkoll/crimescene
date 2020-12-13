@@ -1,172 +1,28 @@
 from collections import defaultdict
+from git_data import Commit, get_commit_list
+from desc_stats import DescriptiveStats, as_stats, dict_as_stats
+from process_git_log import read_diff_for
+from git_proximity_analysis import parse_changes_per_file_in
 import os
-import re
 import subprocess
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Set
+from typing import Dict, List, Set
 import miner.complexity_calculations as complexity_calculations
 from util import DATE_FORMAT
 
 
-class DescriptiveStats:
-    def __init__(self, name, all_values):
-        self.name = name
-        self._all_values = all_values
-        self.total = sum(all_values)
-        self.n_revs = len(all_values)
-
-    def mean(self):
-        return self.total / float(self._protected_n())
-
-    def max_value(self):
-        try:
-            return max(self._all_values)
-        except ValueError:
-            return 0
-
-    def min_value(self):
-        try:
-            return min(self._all_values)
-        except ValueError:
-            return 0
-
-    def sd(self):
-        from math import sqrt
-        std = 0
-        mean = self.mean()
-        for a in self._all_values:
-            std = std + (a - mean)**2
-        std = sqrt(std / float(self._protected_n()))
-        return std
-
-    def _protected_n(self):
-        n = self.n_revs
-        return max(n, 1)
-
-
-def as_stats(revision, complexity_by_line):
-    return DescriptiveStats(revision, complexity_by_line)
-
-
-@dataclass
-class Change:
-    old_filename: str = ''
-    filename: str = ''
-    added_lines: int = 0
-    removed_lines: int = 0
-
-    def __str__(self) -> str:
-        return f'Change(old_filename={self.old_filename}, filename={self.filename}, added_lines={self.added_lines}, removed_lines={self.removed_lines})'
-
-
-@dataclass
-class Commit:
-    sha: str = ''
-    parent_shas: list = field(default_factory=list)
-    child_shas: list = field(default_factory=list)
-    parents: Iterable = field(default_factory=list)
-    children: Iterable = field(default_factory=list)
-    creation_time: datetime = datetime(year=2015,
-                                       month=1,
-                                       day=1,
-                                       tzinfo=timezone.utc)
-    author: str = ''
-    msg: str = ''
-    changes: Iterable[Change] = field(default_factory=list)
-
-
-def get_commit(line: str) -> Commit:
-    commit_match = re.match(
-        r"'\[(\w+)\]\s+\[(.*)\]\s+(\w.*\w)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[\+\-]*\d{4})\s+(\S.*)",
-        #        r"'\[(\w+)\]\s+(\w.*\w)\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+\+(\d{4})\s+(\S.*)",
-        line)
-    if not commit_match:
-        print(f'Failed to match commit in: {line}')
-        return None
-    # offset = int(commit_match.group(9))
-    # dhours = int(offset / 100)
-    # dminutes = offset % 100
-
-    creation_time = datetime.strptime(commit_match.group(4),
-                                      '%Y-%m-%d %H:%M:%S %z')
-    # creation_time = datetime(year=int(commit_match.group(3)),
-    #                          month=int(commit_match.group(4)),
-    #                          day=int(commit_match.group(5)),
-    #                          hour=int(commit_match.group(6)) - dhours,
-    #                          minute=int(commit_match.group(7)) - dminutes,
-    #                          second=int(commit_match.group(8)),
-    #                          tzinfo=timezone.utc)
-    return Commit(sha=commit_match.group(1),
-                  parent_shas=commit_match.group(2).split(' '),
-                  author=commit_match.group(3),
-                  creation_time=creation_time,
-                  msg=commit_match.group(5).replace("'", ""))
-
-
-# Algorithms/Adapter/FEniCS/operator.hh => VSA/Adapter/FEniCS/c1Operator.hh
-
-
-def get_change(line: str) -> Change:
-    change_match = re.match(r'([0-9]+)\s+([0-9]+)\s+(\S+.*)', line)
-    if change_match:
-        old_name = ''
-        name = change_match.group(3)
-
-        if '=>' in name:
-            mapping_regex = r'.*(\{\S*\s*=>\s*\S*\})(.*)' if '{' in name else r'(\S*\s*=>\s*\S*)'
-            mapping_match = re.match(mapping_regex, name)
-            if mapping_match:
-                mapping = mapping_match.group(1)
-                rename_regex = r'\{(\S*)\s*=>\s*(\S*)\}' if '{' in name else r'(\S*)\s*=>\s*(\S*)'
-                rename_match = re.match(rename_regex, mapping)
-                # case: new folder introduced
-                if rename_match.group(1):
-                    old_name = name.replace(mapping, rename_match.group(1))
-                else:
-                    old_name = name.replace('/' + mapping, '')
-                if rename_match.group(2):
-                    name = name.replace(mapping, rename_match.group(2))
-                else:
-                    name = name.replace('/' + mapping, '')
-        return Change(old_filename=old_name,
-                      filename=name,
-                      added_lines=int(change_match.group(1)),
-                      removed_lines=int(change_match.group(2)))
-
-
-def get_commit_list(git_log: str) -> List[Commit]:
-    lines = git_log.split('\n')
-    commits = []
-    current_commit = None
-    for line in lines:
-        if not line:
-            continue
-        if line.startswith("'["):
-            if current_commit:
-                commits.append(current_commit)
-                current_commit = None
-            current_commit = get_commit(line)
-            continue
-
-        if current_commit:
-            change = get_change(line)
-            if change:
-                current_commit.changes.append(change)
-
-    if current_commit:
-        commits.append(current_commit)
-
-    for commit in commits:
-        for parent_sha in commit.parent_shas:
-            for parent in commits:
-                if parent.sha == parent_sha:
-                    parent.children.append(commit)
-                    parent.child_shas.append(commit.sha)
-                    commit.parents.append(parent)
-
-    return commits
+def sum_proximity_stats(all_proximities):
+    """ Received all proximities as a list of dictionaries.
+        Each dictionary represents the proximities in the changed 
+        in one revision.
+        Take this list and group all changes per item.
+    """
+    all_grouped = defaultdict(list)
+    for one_rev_proximity in all_proximities:
+        for one_file, proximity in one_rev_proximity.items():
+            all_grouped[one_file].append(proximity)
+    return dict_as_stats(all_grouped)
 
 
 def _run_cmd(root, args):
@@ -196,8 +52,8 @@ def get_last_commit_sha(root: str):
 
 
 class ForwardTraversal:
-    def __init__(self, git_log, op, valid_cond=None, break_cond=None) -> None:
-        self._log = git_log
+    def __init__(self, commits, op, valid_cond=None, break_cond=None) -> None:
+        self._commits = commits
         self._op = op
         self._valid_cond = valid_cond
         self._break_cond = break_cond
@@ -221,14 +77,14 @@ class ForwardTraversal:
             self._iter(commit=child, visited=visited, child_sha=commit.sha)
 
     def __call__(self) -> None:
-        visited = {commit.sha: set() for commit in self._log.commits}
-        commit = self._log.commits[0]
+        visited = {commit.sha: set() for commit in self._commits}
+        commit = self._commits[0]
         self._iter(commit=commit, visited=visited)
 
 
 class BackwardTraversal:
-    def __init__(self, git_log, op, valid_cond=None, break_cond=None) -> None:
-        self._log = git_log
+    def __init__(self, commits, op, valid_cond=None, break_cond=None) -> None:
+        self._commits = commits
         self._op = op
         self._valid_cond = valid_cond
         self._break_cond = break_cond
@@ -253,8 +109,8 @@ class BackwardTraversal:
             self._iter(commit=parent, visited=visited, parent_sha=commit.sha)
 
     def __call__(self) -> None:
-        visited = {commit.sha: set() for commit in self._log.commits}
-        commit = self._log.commits[-1]
+        visited = {commit.sha: set() for commit in self._commits}
+        commit = self._commits[-1]
         self._iter(commit=commit, visited=visited)
 
 
@@ -280,8 +136,16 @@ def get_lines_before(root: str, before: datetime):
         'git', 'rev-list', '-1', "--pretty=format:'%h'",
         f'--before={before.strftime(DATE_FORMAT)}', 'master'
     ]).split('\n')[1].replace("'", "")
-    print(f'get lines for {sha}')
     return get_lines_in_sha(root=root, sha=sha)
+
+
+def _pdistance(positions):
+    return sum([j - i for i, j in zip(positions[:-1], positions[1:])])
+
+
+def calc_proximity(changes):
+    return dict([(name, _pdistance(change))
+                 for name, change in changes.items()])
 
 
 class GitLog:
@@ -352,7 +216,7 @@ class GitLog:
                     if change.old_filename:
                         filename = change.old_filename
 
-        BackwardTraversal(git_log=self,
+        BackwardTraversal(commits=self._commits,
                           op=op,
                           valid_cond=self._in_interval(begin=begin, end=end))()
         return list(reversed(churn))
@@ -390,7 +254,7 @@ class GitLog:
                                     change.old_filename)
             filename = new_filename
 
-        BackwardTraversal(git_log=self,
+        BackwardTraversal(commits=self._commits,
                           op=op,
                           valid_cond=self._in_interval(begin=begin, end=end))()
 
@@ -411,7 +275,15 @@ class GitLog:
                 'last_change':
                 datetime(year=2015, month=1, day=1, tzinfo=timezone.utc).
                 timestamp(),
-                'churn': []
+                'churn': [],
+                'proximity':
+                0.0,
+                'mean_proximity':
+                0.0,
+                'proximity_sd':
+                0.0,
+                'proximity_max':
+                0.0
             })
 
         def op(commit):
@@ -435,7 +307,7 @@ class GitLog:
             for name in names_in_commit:
                 revisions[name]['soc'] += soc
 
-        # ForwardTraversal(git_log=self,
+        # ForwardTraversal(commits=self._commits,
         #                  op=op,
         #                  valid_cond=self._in_interval(begin, end))()
 
@@ -501,7 +373,7 @@ class GitLog:
             for module in modules_in_commit:
                 revisions[module]['soc'] += soc
 
-        # ForwardTraversal(git_log=self,
+        # ForwardTraversal(commits=self._commits,
         #                  op=op,
         #                  valid_cond=self._in_interval(begin, end))()
 
@@ -559,10 +431,21 @@ class GitLog:
                         filename = change.old_filename
                     return
 
-        BackwardTraversal(git_log=self,
+        BackwardTraversal(commits=self._commits,
                           op=op,
                           valid_cond=self._in_interval(begin=begin, end=end))()
         return commits
+
+    def get_commits(self, begin: datetime, end: datetime) -> List[Commit]:
+        commits = []
+
+        def op(commit):
+            commits.append(commit)
+
+        BackwardTraversal(commits=self._commits,
+                          op=op,
+                          valid_cond=self._in_interval(begin=begin, end=end))()
+        return list(reversed(commits))
 
     def calculate_complexity_over_range(self, filename: str, begin: datetime,
                                         end: datetime):
@@ -613,3 +496,44 @@ class GitLog:
             print(f'Exc: {type(exc)}:{exc}')
         os.system(f'cd {self.root} && git checkout master')
         return stats
+
+    def add_proximity_analysis(self, begin: datetime, end: datetime, stats):
+        proximities = self.get_proximities(begin=begin, end=end)
+        for proximity in proximities:
+            filename = proximity[0]
+            if not filename in stats:
+                continue
+            stats[filename]['proximity'] = proximity[2]
+            stats[filename]['mean_proximity'] = proximity[3]
+            stats[filename]['proximity_sd'] = proximity[4]
+            stats[filename]['proximity_max'] = proximity[5]
+
+    def read_proximities_from(self, begin: datetime, end: datetime):
+        commits = self.get_commits(begin=begin, end=end)
+        proximities = defaultdict(list)
+        for idx in range(len(commits) - 1):
+            current_commit = commits[idx]
+            for change in current_commit.changes:
+                if change.old_filename and change.old_filename in proximities:
+                    proximities[change.filename] = proximities.pop(
+                        change.old_filename)
+            next_commit = commits[idx + 1]
+            git_diff = read_diff_for(self.root, current_commit.sha,
+                                     next_commit.sha)
+            changes = parse_changes_per_file_in(git_diff)
+            new_proximities = calc_proximity(changes)
+            for name, proximity in new_proximities.items():
+                proximities[name].append(proximity)
+
+        return proximities
+
+    def get_proximities(self, begin: datetime, end: datetime):
+        proximities = self.read_proximities_from(begin=begin, end=end)
+        stats = dict_as_stats(proximities)
+        presentation_order = sorted(stats, key=lambda p: p.total, reverse=True)
+        return [[
+            p.name, p.n_revs + 1, p.total,
+            round(p.mean(), 2),
+            round(p.sd(), 2),
+            p.max_value()
+        ] for p in presentation_order]

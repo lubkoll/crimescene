@@ -1,9 +1,9 @@
 #!/bin/env python
 import sys, subprocess, re
 from collections import defaultdict
-import proximity
+from process_git_log import read_revs, read_diff_for
+import miner.proximity as proximity
 import argparse
-import git_interactions
 
 ## Calculates the proximity between changes over a range of commits.
 ##
@@ -14,7 +14,7 @@ import git_interactions
 ## where the two arguments specify the range of revisions of interest.
 ## Note that you must run the program from within a git repo.
 ##
- 
+
 ######################################################################
 ## Git interaction
 ######################################################################
@@ -22,8 +22,9 @@ import git_interactions
 # git log --pretty=format:"%cd  %h  %s" --date=short
 # =>
 # 2013-12-13  1c2f3c1  Introduced layers
- 
+
 new_module_expr = re.compile(r'^--- a\/(.+)')
+
 
 def maybe_new_module(line):
     """ Search for a line like:
@@ -34,7 +35,9 @@ def maybe_new_module(line):
     if m:
         return m.group(1)
 
+
 change_line_expr = re.compile(r'@@ -(\d+),')
+
 
 def changed_line(line):
     """ Search for a line like:
@@ -48,60 +51,93 @@ def changed_line(line):
         offset = m.group(1)
         return int(offset)
 
+
 def parse_changes_per_file_in(git_diff):
-    files_with_changes = {}
+    files_with_changes = defaultdict(list)
     file_name = None
 
     for line in git_diff.split("\n"):
         # read ahead until we note the diff for a file:
         new_file = maybe_new_module(line)
         if new_file:
-            file_name=new_file
+            file_name = new_file
         # one we have the diff of a file, accumulate the changes:
         if file_name:
             change = changed_line(line)
-            proximity.record_change_to(file_name, change,files_with_changes)
+            if not change:
+                continue
+            files_with_changes[file_name].append(change)
     return files_with_changes
-    
+
+
 ######################################################################
 ## Output
 ######################################################################
 
+
 def as_csv(result):
-    print 'file,revs,total,mean,sd,max'
+    print('file,revs,total,mean,sd,max')
     for p in result:
-        fields_of_interest = [p.name, p.n_revs + 1, p.total, round(p.mean(),2), round(p.sd(),2), p.max_value()]
+        fields_of_interest = [
+            p.name, p.n_revs + 1, p.total,
+            round(p.mean(), 2),
+            round(p.sd(), 2),
+            p.max_value()
+        ]
         printable = [str(field) for field in fields_of_interest]
-        print ','.join(printable)
+        print(','.join(printable))
+
 
 ######################################################################
 ## Main
 ######################################################################
 
-def read_proximities_from(revision_range):
+
+def read_proximities_from(root, revision_range):
     start_rev, end_rev = revision_range
-    revs = git_interactions.read_revs(start_rev, end_rev)
+    revs = read_revs(root, start_rev, end_rev)
     proximities = []
     for i in range(len(revs) - 1):
         first_revision = revs[i]
-        revision_to_compare = revs[i+1]
-        git_diff = git_interactions.read_diff_for(first_revision, revision_to_compare)
+        revision_to_compare = revs[i + 1]
+        git_diff = read_diff_for(root, first_revision, revision_to_compare)
         changes = parse_changes_per_file_in(git_diff)
         proximities.append(proximity.calc_proximity(changes))
     return proximities
 
+
+def get_proximities(root: str, start_rev: str, end_rev: str):
+    revision_range = start_rev, end_rev
+    proximities = read_proximities_from(root, revision_range)
+    stats = proximity.sum_proximity_stats(proximities)
+    presentation_order = sorted(stats, key=lambda p: p.total, reverse=True)
+    return [[
+        p.name, p.n_revs + 1, p.total,
+        round(p.mean(), 2),
+        round(p.sd(), 2),
+        p.max_value()
+    ] for p in presentation_order]
+
+
 def run(args):
     revision_range = args.start, args.end
-    proximities = read_proximities_from(revision_range)
+    proximities = read_proximities_from('/home/lars/projects/Spacy',
+                                        revision_range)
     stats = proximity.sum_proximity_stats(proximities)
-    presentation_order = proximity.sorted_on_proximity(stats)
+    presentation_order = sorted(stats, key=lambda p: p.total, reverse=True)
     as_csv(presentation_order)
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Calculates proximity of changes recorded in the revision history.')
-    parser.add_argument('--start', required=True, help='The first commit hash to include')
-    parser.add_argument('--end', required=True, help='The last commit hash to include')
-    
+    parser = argparse.ArgumentParser(
+        description=
+        'Calculates proximity of changes recorded in the revision history.')
+    parser.add_argument('--start',
+                        required=True,
+                        help='The first commit hash to include')
+    parser.add_argument('--end',
+                        required=True,
+                        help='The last commit hash to include')
+
     args = parser.parse_args()
     run(args)
- 
