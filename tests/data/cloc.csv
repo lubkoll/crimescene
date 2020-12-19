@@ -1,0 +1,4 @@
+
+language,filename,blank,comment,code,"github.com/AlDanial/cloc v 1.81  T=0.01 s (128.1 files/s, 2305.3 lines/s)"
+C/C++ Header,./HilbertSpaceNorm.h,4,1,13
+SUM,,4,1,13

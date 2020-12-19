@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import re
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
 
 @dataclass
@@ -33,7 +33,7 @@ class Commit:
 
 def get_commit(line: str) -> Commit:
     commit_match = re.match(
-        r"'\[(\w+)\]\s+\[(.*)\]\s+(\w.*\w)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[\+\-]*\d{4})\s+(\S.*)",
+        r"'*\[(\w+)\]\s+\[(.*)\]\s+(\w.*\w)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[\+\-]*\d{4})\s+(\S.*)",
         #        r"'\[(\w+)\]\s+(\w.*\w)\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\s+\+(\d{4})\s+(\S.*)",
         line)
     if not commit_match:
@@ -77,14 +77,24 @@ def get_change(line: str) -> Change:
                       removed_lines=int(change_match.group(2)))
 
 
-def get_commit_list(git_log: str) -> List[Commit]:
+def add_parents_and_children(commits: List[Commit]):
+    for commit in commits:
+        for parent_sha in commit.parent_shas:
+            for parent in commits:
+                if parent.sha == parent_sha:
+                    parent.children.append(commit)
+                    parent.child_shas.append(commit.sha)
+                    commit.parents.append(parent)
+
+
+def get_commit_list(git_log: str) -> Tuple[Commit]:
     lines = git_log.split('\n')
     commits = []
     current_commit = None
     for line in lines:
         if not line:
             continue
-        if line.startswith("'["):
+        if line.startswith("'[") or line.startswith("["):
             if current_commit:
                 commits.append(current_commit)
                 current_commit = None
@@ -99,12 +109,6 @@ def get_commit_list(git_log: str) -> List[Commit]:
     if current_commit:
         commits.append(current_commit)
 
-    for commit in commits:
-        for parent_sha in commit.parent_shas:
-            for parent in commits:
-                if parent.sha == parent_sha:
-                    parent.children.append(commit)
-                    parent.child_shas.append(commit.sha)
-                    commit.parents.append(parent)
+    add_parents_and_children(commits)
 
-    return commits
+    return list(sorted(commits, key=lambda commit: commit.creation_time))

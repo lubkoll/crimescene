@@ -66,16 +66,10 @@ class FileAnalysis:
         if self._selected_file:
             data, n_revisions = self._git_log.get_couplings(
                 filename=self._selected_file, begin=self._begin, end=self._end)
-            coupled = sorted(data.items(), key=lambda x: x[1], reverse=True)
-            # coupled = []
-            # for name, n_coupled in data.items():
-            #     if name == 'count':
-            #         continue
-            #     if n_coupled > 2 and n_coupled / n_revisions > 0.2:
-            #         coupled.append((name, n_coupled))
-            # coupled = sorted(coupled, key=lambda x: x[1], reverse=True)
-            # for name, n_coupled in coupled:
-            #     coupling_table.append(f'{name}: {n_coupled}/{n_revisions}')
+            coupled = list(
+                sorted(data.items(), key=lambda x: x[1], reverse=True))
+            if len(coupled) > 10:
+                coupled = coupled[:10]
             for name, n_coupled in coupled:
                 coupling_table.append(f'{name}: {n_coupled}/{n_revisions}')
         return Div(text='</br>'.join(coupling_table),
@@ -132,7 +126,8 @@ class FileAnalysis:
             else:
                 x = [
                     self._git_log.get_commit_from_sha(
-                        sha).creation_time.timestamp() for sha, _, _ in churn
+                        sha).creation_time.timestamp() * 1000
+                    for sha, _, _ in churn
                 ]
             x0 = [
                 self._git_log.get_commit_from_sha(sha).creation_time
@@ -157,7 +152,7 @@ class FileAnalysis:
             else:
                 x = [
                     self._git_log.get_commit_from_sha(
-                        row[0]).creation_time.timestamp()
+                        row[0]).creation_time.timestamp() * 1000
                     for row in self._complexity_trend
                 ]
 

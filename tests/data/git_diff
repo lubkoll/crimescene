@@ -1,0 +1,543 @@
+diff --git a/Examples/Kaskade/Optimization/CMakeLists.txt b/Examples/Kaskade/Optimization/CMakeLists.txt
+index 3f42496b..e40c81f6 100644
+--- a/Examples/Kaskade/Optimization/CMakeLists.txt
++++ b/Examples/Kaskade/Optimization/CMakeLists.txt
+@@ -1 +1,3 @@
+-add_subdirectory(PDEConstraint_Nonlinear_Heat_Transfer)
+\ No newline at end of file
++add_subdirectory(PDEConstraint_Nonlinear_Heat_Transfer)
++add_subdirectory(PDEConstraint_Nonlinear_Heat_Transfer_2)
++#add_subdirectory(PDPCompare)
+\ No newline at end of file
+diff --git a/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/CMakeLists.txt b/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/CMakeLists.txt
+new file mode 100644
+index 00000000..4cb8f797
+--- /dev/null
++++ b/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/CMakeLists.txt
+@@ -0,0 +1,13 @@
++cmake_minimum_required(VERSION 3.13)
++
++project(spacy-kaskade-pde-constraint-nonlinear-heat-transfer-2)
++
++find_package(Kaskade7 REQUIRED)
++if(NOT TARGET Spacy::Spacy)
++    find_package(Spacy REQUIRED)
++endif()
++
++add_executable(${PROJECT_NAME} nonlinear_heat.cpp nonlinear_control.hh ${Kaskade7_UMFPACK_SRC})
++target_link_libraries(${PROJECT_NAME} 
++    Spacy::Spacy Kaskade7::Kaskade7 ${Kaskade7_UMFPACK_LIB}
++)
+diff --git a/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/nonlinear_control.hh b/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/nonlinear_control.hh
+new file mode 100644
+index 00000000..f724bda8
+--- /dev/null
++++ b/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/nonlinear_control.hh
+@@ -0,0 +1,170 @@
++#pragma once
++
++#include "../../boundary_caches.hh"
++#include "../../traits.hh"
++#include <functional>
++
++#include <fem/variables.hh>
++#include <utilities/linalg/scalarproducts.hh>
++
++#include <memory>
++#include <type_traits>
++
++namespace Kaskade
++{
++    enum class RoleOfFunctional
++    {
++        NORMAL,
++        TANGENTIAL
++    };
++
++    template < class Ids, class Constraint, class CostFunctional, class AnsatzVars_, class TestVars_ = AnsatzVars_,
++               RoleOfFunctional role = RoleOfFunctional::NORMAL >
++    class StepFunctional
++    {
++    public:
++        using Scalar = double;
++        using AnsatzVars = AnsatzVars_;
++        using TestVars = TestVars_;
++        using OriginVars = AnsatzVars;
++        static constexpr int dim = AnsatzVars::Grid::dimension;
++        static ProblemType const type = std::is_same< AnsatzVars, TestVars >::value ? VariationalFunctional : WeakFormulation;
++
++        typedef typename AnsatzVars::Grid Grid;
++        typedef typename Grid::template Codim< 0 >::Entity Cell;
++
++        template < int row >
++        using D1 = NonConstD1< row >;
++
++        static int const ySIdx = boost::fusion::result_of::value_at_c< typename AnsatzVars::Variables, Ids::state >::type::spaceIndex;
++        static int const uSIdx = boost::fusion::result_of::value_at_c< typename AnsatzVars::Variables, Ids::control >::type::spaceIndex;
++        static int const pSIdx = boost::fusion::result_of::value_at_c< typename AnsatzVars::Variables, Ids::adjoint >::type::spaceIndex;
++
++        class DomainCache : public CacheBase< StepFunctional, DomainCache >
++        {
++        public:
++            DomainCache( StepFunctional const& f, typename AnsatzVars::VariableSet const& vars_, int )
++                : f_( f ), vars( vars_ ), constraint_( f_.constraint_ ), costFunctional_( f_.costFunctional_ )
++            {
++            }
++
++            template < class Position, class Evaluators >
++            void evaluateAt( Position const& x, Evaluators const& evaluators )
++            {
++                using namespace boost::fusion;
++                y = at_c< Ids::state >( vars.data ).value( at_c< ySIdx >( evaluators ) );
++                u = at_c< Ids::control >( vars.data ).value( at_c< uSIdx >( evaluators ) );
++                p = at_c< Ids::adjoint >( vars.data ).value( at_c< pSIdx >( evaluators ) );
++
++                dy = at_c< Ids::state >( vars.data ).derivative( at_c< ySIdx >( evaluators ) );
++                dp = at_c< Ids::adjoint >( vars.data ).derivative( at_c< pSIdx >( evaluators ) );
++
++                costFunctional_.template update< Ids::state >( y );
++                costFunctional_.template update< Ids::control >( u );
++                costFunctional_.template update< Ids::reference >(
++                    at_c< Ids::state >( f_.interpolated_reference_.data ).value( at_c< ySIdx >( evaluators ) ) );
++                constraint_.template update< Ids::state >( std::make_tuple( y, dy ) );
++            }
++
++            Scalar d0() const
++            {
++                return costFunctional_();
++            }
++
++            template < int row >
++            Scalar d1_impl( VariationalArg< Scalar, dim, TestVars::template Components< row >::m > const& arg ) const
++            {
++                if ( row == Ids::state )
++                    return costFunctional_.template d1< Ids::state >( if_( arg.value, y ) ) +
++                           sp( dp,
++                               constraint_.template d1< Ids::state >( std::make_tuple( if_( arg.value, y ), if_( arg.derivative, dy ) ) ) );
++                if ( row == Ids::control )
++                    return costFunctional_.template d1< Ids::control >( if_( arg.value, u ) ) - sp( p, if_( arg.value, u ) );
++                if ( row == Ids::adjoint )
++                    return sp( if_( arg.derivative, dp ), constraint_() ) - sp( if_( arg.value, p ), u );
++                return 0;
++            }
++
++            template < int row, int col >
++            Scalar d2_impl( VariationalArg< Scalar, dim, TestVars::template Components< row >::m > const& arg1,
++                            VariationalArg< Scalar, dim, TestVars::template Components< col >::m > const& arg2 ) const
++            {
++                if ( row == Ids::state && col == Ids::state )
++                {
++                    if ( role == RoleOfFunctional::TANGENTIAL )
++                        return costFunctional_.template d2< Ids::state, Ids::state >( if_( arg1.value, y ), if_( arg2.value, y ) ) +
++                               sp( dp, constraint_.template d2< Ids::state, Ids::state >(
++                                           std::make_tuple( if_( arg1.value, y ), if_( arg1.derivative, dy ) ),
++                                           std::make_tuple( if_( arg2.value, y ), if_( arg2.derivative, dy ) ) ) );
++                    else
++                        return costFunctional_.template d2< Ids::state, Ids::state >( if_( arg1.value, y ), if_( arg2.value, y ) ) +
++                               sp( if_( arg1.derivative, dy ), if_( arg2.derivative, dy ) );
++                }
++
++                if ( row == Ids::control && col == Ids::control )
++                    return costFunctional_.template d2< Ids::control, Ids::control >( arg1.value, arg2.value );
++
++                if ( row == Ids::adjoint && col == Ids::control )
++                    return -sp( if_( arg2.value, u ), if_( arg1.value, p ) );
++                if ( row == Ids::control && col == Ids::adjoint )
++                    return -sp( if_( arg1.value, u ), if_( arg2.value, p ) );
++
++                if ( row == Ids::state && col == Ids::adjoint )
++                    return sp( if_( arg2.derivative, dp ), constraint_.template d1< Ids::state >(
++                                                               std::make_tuple( if_( arg1.value, y ), if_( arg1.derivative, dy ) ) ) );
++                if ( row == Ids::adjoint && col == Ids::state )
++                    return sp( if_( arg1.derivative, dp ), constraint_.template d1< Ids::state >(
++                                                               std::make_tuple( if_( arg2.value, y ), if_( arg2.derivative, dy ) ) ) );
++                return 0;
++            }
++
++        private:
++            const StepFunctional& f_;
++            typename AnsatzVars::VariableSet const& vars;
++            Constraint constraint_;
++            CostFunctional costFunctional_;
++            Dune::FieldVector< Scalar, AnsatzVars::template Components< Ids::state >::m > y;
++            Dune::FieldVector< Scalar, AnsatzVars::template Components< Ids::control >::m > u;
++            Dune::FieldVector< Scalar, AnsatzVars::template Components< Ids::adjoint >::m > p;
++            Dune::FieldMatrix< Scalar, AnsatzVars::template Components< Ids::state >::m, dim > dy;
++            Dune::FieldMatrix< Scalar, AnsatzVars::template Components< Ids::adjoint >::m, dim > dp;
++            LinAlg::EuclideanScalarProduct sp;
++        };
++
++        using BoundaryCache = Optimization::HomogeneousDirichletBoundary< StepFunctional, Ids::state, Ids::adjoint >;
++
++        explicit StepFunctional( Constraint constraint, CostFunctional costFunctional,
++                                 typename AnsatzVars::VariableSet interpolated_reference )
++            : constraint_( std::move( constraint ) ), costFunctional_( std::move( costFunctional ) ),
++              interpolated_reference_( std::move( interpolated_reference ) )
++        {
++        }
++
++        template < int row, int col >
++        struct D2 : public FunctionalBase< WeakFormulation >::D2< row, col >
++        {
++            static bool const present = !( ( row == Ids::adjoint && col == Ids::adjoint ) || ( row == Ids::state && col == Ids::control ) ||
++                                           ( row == Ids::control && col == Ids::state ) );
++            static bool const symmetric = row == col;
++            static bool const lumped = false;
++        };
++
++        template < class Cell >
++        int integrationOrder( Cell const& /* cell */, int shapeFunctionOrder, bool boundary ) const
++        {
++            if ( boundary )
++                return 2 * shapeFunctionOrder;
++            return 4 * shapeFunctionOrder - 2;
++        }
++
++        Constraint constraint_;
++        CostFunctional costFunctional_;
++        typename AnsatzVars::VariableSet interpolated_reference_;
++    };
++
++    template < class Ids, class Constraint, class CostFunctional, class AnsatzVars, class TestVars = AnsatzVars >
++    using NormalStepFunctional = StepFunctional< Ids, Constraint, CostFunctional, AnsatzVars, TestVars, RoleOfFunctional::NORMAL >;
++
++    template < class Ids, class Constraint, class CostFunctional, class AnsatzVars, class TestVars = AnsatzVars >
++    using TangentialStepFunctional = StepFunctional< Ids, Constraint, CostFunctional, AnsatzVars, TestVars, RoleOfFunctional::TANGENTIAL >;
++} // namespace Kaskade
+diff --git a/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/nonlinear_heat.cpp b/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/nonlinear_heat.cpp
+new file mode 100644
+index 00000000..8ebc3ce3
+--- /dev/null
++++ b/Examples/Kaskade/Optimization/PDEConstraint_Nonlinear_Heat_Transfer_2/nonlinear_heat.cpp
+@@ -0,0 +1,189 @@
++#define FUSION_MAX_VECTOR_SIZE 15 // NOLINT(cppcoreguidelines-macro-usage)
++
++#include "../../interpolate.h"
++#include "nonlinear_control.hh"
++#include <functional>
++#include <fung/examples/nonlinear_heat.hh>
++#include <fung/fung.hh>
++
++#include <Spacy/Adapter/kaskade.hh>
++#include <Spacy/Spacy.h>
++
++#include <fem/forEach.hh>
++#include <fem/gridmanager.hh>
++#include <fem/lagrangespace.hh>
++#include <io/vtk.hh>
++#include <utilities/gridGeneration.hh>
++#include <utilities/kaskopt.hh>
++
++#include <dune/grid/config.h>
++#include <dune/grid/uggrid.hh>
++
++#include <chrono>
++#include <iostream>
++
++using Kaskade::Components;
++using Kaskade::ContinuousLagrangeMapper;
++using Kaskade::FEFunctionSpace;
++using Kaskade::SpaceIndex;
++using Kaskade::Variable;
++using Kaskade::VariableId;
++using Kaskade::VariableSetDescription;
++using std::cout;
++using std::endl;
++
++/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
++/* * * * * * * * * * * * * * * * * * * * * * function spaces * * * * * * * * * * * * * * * * * * * * * */
++/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
++constexpr int dim = 2;
++using Grid = Dune::UGGrid< dim >;
++using GridView = Grid::LeafGridView;
++using H1Space = FEFunctionSpace< ContinuousLagrangeMapper< double, GridView > >;
++using Spaces = boost::fusion::vector< FEFunctionSpace< ContinuousLagrangeMapper< double, GridView > > const* >;
++using PrimalVariables = boost::fusion::vector< Variable< SpaceIndex< 0 >, Components< 1 >, VariableId< Ids::state > >,
++                                               Variable< SpaceIndex< 0 >, Components< 1 >, VariableId< Ids::control > > >;
++using DualVariables = boost::fusion::vector< Variable< SpaceIndex< 0 >, Components< 1 >, VariableId< 0 > > >;
++using VariableDescriptions = boost::fusion::vector< Variable< SpaceIndex< 0 >, Components< 1 >, VariableId< Ids::state > >,
++                                                    Variable< SpaceIndex< 0 >, Components< 1 >, VariableId< Ids::control > >,
++                                                    Variable< SpaceIndex< 0 >, Components< 1 >, VariableId< Ids::adjoint > > >;
++using Descriptions = VariableSetDescription< Spaces, VariableDescriptions >;
++using PrimalDescriptions = VariableSetDescription< Spaces, PrimalVariables >;
++using DualDescriptions = VariableSetDescription< Spaces, DualVariables >;
++using VarSet = Descriptions::VariableSet;
++
++template < class StateVector, class Reference, class ControlVector >
++auto trackingTypeCostFunctional( double alpha, const StateVector& y, const Reference& y_ref, const ControlVector& u )
++{
++    using namespace FunG;
++    return finalize( squared( variable< Ids::state >( y ) - variable< Ids::reference >( y_ref ) ) +
++                     alpha * squared( variable< Ids::control >( u ) ) );
++}
++
++int main( int argc, char* argv[] )
++{
++    const auto silence = 0;
++    std::unique_ptr< boost::property_tree::ptree > pt = getKaskadeOptions( argc, argv, silence, false );
++
++    const auto desiredAccuracy = getParameter( pt, "desiredAccuracy", 1e-6 );
++    const auto eps = getParameter( pt, "eps", 1e-12 );
++    const auto alpha = getParameter( pt, "alpha", 1e-4 );
++    const auto maxSteps = getParameter( pt, "maxSteps", 500 );
++    const auto initialRefinements = getParameter( pt, "initialRefinements", 5 );
++    const auto iterativeRefinements = getParameter( pt, "iterativeRefinements", 0 );
++    const auto FEorder = getParameter( pt, "FEorder", 1 );
++    const auto verbose = getParameter( pt, "verbose", 2 );
++    const auto c = getParameter( pt, "cPara", 1e1 );
++    const auto d = getParameter( pt, "dPara", 1e0 );
++    const auto e = getParameter( pt, "ePara", 0.0 );
++    const auto desContr = getParameter( pt, "desiredContraction", 0.5 );
++    const auto relDesContr = getParameter( pt, "relaxedContraction", desContr + 0.1 );
++    const auto maxContr = getParameter( pt, "maxContraction", 0.75 );
++
++    /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
++    /* * * * * * * * * * * * * * * * * * * * * * grid generation * * * * * * * * * * * * * * * * * * * * * */
++    /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
++    GridManager< Grid > gm( createUnitSquare< Grid >( 1., false ) );
++    gm.enforceConcurrentReads( true );
++    gm.globalRefine( initialRefinements );
++    std::cout << "vertices: " << gm.grid().size( dim ) << std::endl;
++    std::cout << std::setprecision( 10 );
++
++    ::H1Space h1Space( gm, gm.grid().leafGridView(), FEorder );
++    Spaces spaces( &h1Space );
++
++    Descriptions desc( spaces, { "y", "u", "p" } );               // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
++    PrimalDescriptions primalDescription( spaces, { "y", "u" } ); // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
++    DualDescriptions dualDescription( spaces, { "p" } );          // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
++
++    // Reference solution
++    cout << "interpolate" << endl;
++    VarSet x_ref( desc );
++    interpolateGloballyFromFunctor< PlainAverage >(
++        boost::fusion::at_c< Ids::state >( x_ref.data ), []( auto const& cell, auto const& xLocal ) -> Dune::FieldVector< double, 1 > {
++            const auto x = cell.geometry().global( xLocal );
++            return Dune::FieldVector< double, 1 >( 12 * ( 1 - x[ 1 ] ) * x[ 1 ] * ( 1 - x[ 0 ] ) * x[ 0 ] );
++        } );
++
++    cout << "create domain" << endl;
++    auto X = Spacy::Kaskade::makeHilbertSpace< Descriptions >( desc, "X" );
++    auto Z = Spacy::Kaskade::makeHilbertSpace< PrimalDescriptions >( primalDescription, "Z" );
++    auto P = Spacy::Kaskade::makeHilbertSpace< DualDescriptions >( dualDescription, "P" );
++
++    using ZXIdxMap =
++        boost::fusion::vector< Spacy::Kaskade::IdxPair< Ids::state, Ids::state >, Spacy::Kaskade::IdxPair< Ids::control, Ids::control > >;
++    Spacy::Kaskade::setSubSpaceRelation< Descriptions, PrimalDescriptions, ZXIdxMap >( X, Z );
++    using PXIdxMap = boost::fusion::vector< Spacy::Kaskade::IdxPair< 0, Ids::adjoint > >;
++    Spacy::Kaskade::setSubSpaceRelation< Descriptions, DualDescriptions, PXIdxMap >( X, P );
++
++    // Normal step functional with cg solver
++    // auto fn = Spacy::Kaskade::makeLagrangeCGFunctional<stateId,controlId,adjointId>(
++    // NormalStepFunctional<stateId,controlId,adjointId,double,Descriptions>(alpha,x_ref,c,d) , domain );
++
++    cout << "create functional" << endl;
++    Dune::FieldVector< double, 1 > y0{ 0 };
++    Dune::FieldVector< double, 1 > u0{ 0 };
++    Dune::FieldVector< double, 1 > y_ref{ 0.5 };
++    Dune::FieldMatrix< double, 1, dim > dy0{ 0 };
++    auto constraint = FunG::heatModel( c, d, y0, dy0 );
++    auto costFunctional = trackingTypeCostFunctional( alpha, y0, y_ref, u0 );
++
++    // Normal step functional with direct solver
++    auto normalStepFunctional =
++        NormalStepFunctional< Ids, decltype( constraint ), decltype( costFunctional ), Descriptions >( constraint, costFunctional, x_ref );
++    auto fn = Spacy::Kaskade::makeC2Functional( std::move( normalStepFunctional ), X );
++
++    // Lagrange functional
++    cout << "make tangential functional " << endl;
++    auto tangentialStepFunctional = TangentialStepFunctional< Ids, decltype( constraint ), decltype( costFunctional ), Descriptions >(
++        constraint, costFunctional, x_ref );
++    auto ft = Spacy::Kaskade::makeC2Functional( std::move( tangentialStepFunctional ), X );
++
++    cout << "set up solver" << endl;
++    // algorithm and parameters
++    auto cs = Spacy::CompositeStep::AffineCovariantSolver( fn, ft, X, &Z, &P );
++    cs.setRelativeAccuracy( desiredAccuracy );
++    cs.setEps( eps );
++    cs.setVerbosityLevel( 2 );
++    cs.setMaxSteps( maxSteps );
++    cs.setIterativeRefinements( iterativeRefinements );
++    cs.setDesiredContraction( desContr );
++    cs.setRelaxedDesiredContraction( relDesContr );
++    cs.setMaximalContraction( maxContr );
++
++    cout << "start solver" << endl;
++    using namespace std::chrono;
++    const auto startTime = high_resolution_clock::now();
++    auto result = cs();
++    std::cout << "computation time: " << duration_cast< seconds >( high_resolution_clock::now() - startTime ).count() << "s." << std::endl;
++
++    VarSet x( desc );
++    Spacy::Kaskade::copy( result, x );
++
++    auto x3 = zero( X );
++    Spacy::Kaskade::copy( x, x3 );
++    VarSet x2( desc );
++    Spacy::Kaskade::copy( x3, x2 );
++    // Spacy::Kaskade::writeVTK< VariableDescriptions >( x2, "x2" );
++
++    auto spacy_z = Z.project( x3 );
++    PrimalDescriptions::VariableSet z( primalDescription );
++    Spacy::Kaskade::copy( spacy_z, z );
++
++    auto spacy_p = P.project( x3 );
++    DualDescriptions::VariableSet p( dualDescription );
++    Spacy::Kaskade::copy( spacy_p, p );
++
++    auto spacy_z2 = X.embed( spacy_p );
++    VarSet x4( desc );
++    Spacy::Kaskade::copy( spacy_z2, x4 );
++
++    IoOptions options;
++    options.outputType = IoOptions::ascii;
++    std::string outfilename( "nonlinear_control" );
++    writeVTKFile( gm.grid().leafGridView(), x, outfilename, options, FEorder );
++    writeVTKFile( gm.grid().leafGridView(), x_ref, "reference", options, FEorder );
++    writeVTKFile( gm.grid().leafGridView(), x4, "x4", options, FEorder );
++    writeVTKFile( gm.grid().leafGridView(), z, "primal_variables", options, FEorder );
++    writeVTKFile( gm.grid().leafGridView(), p, "dual_variables", options, FEorder );
++    // writeVTKFile( gm.grid().leafGridView(), p, "dual_variables", options, FEorder );
++}
+diff --git a/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.cpp b/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.cpp
+index 54193b91..61bfd96a 100644
+--- a/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.cpp
++++ b/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.cpp
+@@ -23,7 +23,7 @@ namespace Spacy
+ {
+     namespace
+     {
+-        auto primalProjection( const Spacy::Vector& v )
++        auto primalProjectionForProductSpaces( const Spacy::Vector& v )
+         {
+             auto w = v;
+             auto& w_ = cast_ref< ProductSpace::Vector >( w );
+@@ -31,7 +31,7 @@ namespace Spacy
+             return w;
+         }
+ 
+-        auto dualProjection( const Spacy::Vector& v )
++        auto dualProjectionForProductSpaces( const Spacy::Vector& v )
+         {
+             auto w = v;
+             auto& w_ = cast_ref< ProductSpace::Vector >( w );
+@@ -87,9 +87,10 @@ namespace Spacy
+         {
+         }
+ 
+-        AffineCovariantSolver::AffineCovariantSolver( C2Functional N, C2Functional L, VectorSpace& domain )
++        AffineCovariantSolver::AffineCovariantSolver( C2Functional N, C2Functional L, VectorSpace& domain, const VectorSpace* Y,
++                                                      const VectorSpace* P )
+             : retraction_( linearRetraction ), dualUpdate_( linearRetraction ), N_( std::move( N ) ), L_( std::move( L ) ),
+-              domain_( domain ), chartSpace_( domain )
++              domain_( domain ), Y_{ Y }, P_{ P }, chartSpace_( domain )
+         {
+         }
+ 
+@@ -116,14 +117,14 @@ namespace Spacy
+                     std::cout << "\nComposite Steps: Iteration " << step << ".\n";
+                 if ( verbose() )
+                     std::cout << spacing << "Computing normal step." << std::endl;
+-                auto Dn = computeNormalStep( x );
+-                auto norm_Dn = norm( Dn );
++                const auto Dn = computeNormalStep( x );
++                const auto norm_Dn = norm( Dn );
+                 if ( verbose() )
+                 {
+                     std::cout << spacing << "Normal step length: " << norm_Dn << std::endl;
+                     std::cout << spacing << "Computing normal damping factor" << std::endl;
+                 }
+-                DampingFactor nu = computeNormalStepDampingFactor( norm_Dn );
++                auto nu = computeNormalStepDampingFactor( norm_Dn );
+ 
+                 if ( getVerbosityLevel() > 1 )
+                 {
+@@ -151,18 +152,12 @@ namespace Spacy
+                 if ( verbose() )
+                     std::cout << spacing << "Suggested regularization parameter for TRCG" << theta_sugg << std::endl;
+ 
+-                auto tau = DampingFactor{ 0 };
+-                Real norm_x = 0.;
+-                Real norm_dx = 0.;
+-                auto ds = Dt;
+-                auto dx = Dt;
+-
+                 if ( verbose() )
+                 {
+                     std::cout << spacing << "Tangential step length: " << norm( Dt ) << std::endl;
+                     std::cout << spacing << "Computing damping factors." << std::endl;
+                 }
+-                std::tie( tau, dx, ds, norm_x, norm_dx ) = computeCompositeStep( nu, norm_Dn, x, Dn, Dt, res_p, v );
++                auto [ tau, dx, ds, norm_x, norm_dx ] = computeCompositeStep( nu, norm_Dn, x, Dn, Dt, res_p, v );
+ 
+                 if ( norm_dx > 0 )
+                     previous_step_contraction = norm( ds ) / norm( dx );
+@@ -630,6 +625,36 @@ namespace Spacy
+             return result;
+         }
+ 
++        Vector AffineCovariantSolver::primalProjection( const Vector& x ) const
++        {
++            if ( is< ProductSpace::Vector >( x ) )
++            {
++                return primalProjectionForProductSpaces( x );
++            }
++
++            if ( Y_ )
++            {
++                return x.space().embed( Y_->project( x ) );
++            }
++
++            throw Exception::NotImplemented( __func__, "non-product space vector without primal and dual space defined" );
++        }
++
++        Vector AffineCovariantSolver::dualProjection( const Vector& x ) const
++        {
++            if ( is< ProductSpace::Vector >( x ) )
++            {
++                return dualProjectionForProductSpaces( x );
++            }
++
++            if ( P_ )
++            {
++                return x.space().embed( P_->project( x ) );
++            }
++
++            throw Exception::NotImplemented( __func__, "non-product space vector without primal and dual space defined" );
++        }
++
+         DampingFactor AffineCovariantSolver::computeNormalStepDampingFactor( Real norm_Dn ) const
+         {
+             if ( !N_ )
+diff --git a/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.h b/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.h
+index 79693841..42544e0e 100644
+--- a/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.h
++++ b/Spacy/Algorithm/CompositeStep/AffineCovariantSolver.h
+@@ -66,8 +66,10 @@ namespace Spacy
+              * c'(x_k)\delta x_k + c(x_k)=0\f]
+              * @param L Lagrange functional
+              * @param domain domain space \f$X=\{Y,U,P\}\f$
++             * @param Y space of primal variables
+              */
+-            AffineCovariantSolver( C2Functional N, C2Functional L, VectorSpace& domain );
++            AffineCovariantSolver( C2Functional N, C2Functional L, VectorSpace& domain, const VectorSpace* Y = nullptr,
++                                   const VectorSpace* P = nullptr );
+ 
+             AffineCovariantSolver( C2Functional N, C2Functional L, VectorSpace& domain,
+                                    std::function< Vector( const Vector&, const Vector& ) > retraction );
+@@ -118,10 +120,15 @@ namespace Spacy
+ 
+             Vector retractPrimal( const Vector& origin, const Vector& increment ) const;
+ 
++            Vector primalProjection( const Vector& x ) const;
++            Vector dualProjection( const Vector& x ) const;
++
+             std::function< Vector( const Vector&, const Vector& ) > retraction_;
+             std::function< Vector( const Vector&, const Vector& ) > dualUpdate_;
+             C2Functional N_, L_;
+             VectorSpace& domain_;
++            const VectorSpace* Y_ = nullptr; // primal space
++            const VectorSpace* P_ = nullptr; // dual space
+             VectorSpace& chartSpace_;
+ 
+             LipschitzConstant omegaL{ 1e-6 }, omegaC{ 1e-6 };

@@ -20,7 +20,10 @@ def read_locs(locs_str):
         if name == 'filename':
             continue
         name = name[2:]
-        locs[name] = int(entries[4])
+        try:
+            locs[name] = int(entries[4])
+        except ValueError:
+            print(f'E {entries[4]}')
     return locs
 
 
@@ -29,6 +32,16 @@ def get_loc(root: str, filename: str) -> int:
         _run_cmd(root=root,
                  args=['cloc', filename, '--csv', '--unix',
                        '--quiet']))[filename]
+
+
+def get_loc_in_revision(root: str, filename: str, sha: str) -> int:
+    _run_cmd(root=root, args=['git', 'checkout', sha])
+    locs = read_locs(
+        _run_cmd(root=root,
+                 args=['cloc', filename, '--csv', '--unix',
+                       '--quiet'])).get(filename)
+    _run_cmd(root=root, args=['git', 'checkout', 'master'])
+    return locs if locs else 0
 
 
 def compute_complexity(historic_version: str):

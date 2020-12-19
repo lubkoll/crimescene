@@ -37,6 +37,21 @@ def get_full_log(root: str):
     ])
 
 
+def get_log_after_revision(root: str, sha: str):
+    return _run_cmd(root=root,
+                    args=[
+                        'git', 'log', "--pretty=format:'[%h] [%p] %aN %cd %s'",
+                        '--date=iso', '--numstat', '--topo-order',
+                        f'{sha}..HEAD'
+                    ])
+
+
+def get_files_in_repository(root: str):
+    return _run_cmd(root=root,
+                    args=['git', 'ls-tree', '-r', 'master',
+                          '--name-only']).split('\n')
+
+
 def get_first_commit_date(root: str):
     return datetime.strptime(
         _run_cmd(root, ['git', 'log', '--pretty=format:"%cd"', '--date=short'
@@ -148,17 +163,36 @@ def calc_proximity(changes):
                  for name, change in changes.items()])
 
 
+def in_interval(begin: datetime, end: datetime):
+    def in_interval(commit):
+        return begin <= commit.creation_time <= end
+
+    return in_interval
+
+
 class GitLog:
     def __init__(self, root: str, commits) -> None:
         self.root = root
         self._commits: List[Commit] = commits
         self._sha2commit = {commit.sha: commit for commit in commits}
+        self._sha2time = {
+            commit.sha: commit.creation_time
+            for commit in commits
+        }
         # for commit in commits:
         #     print(
-        #         f'{commit.sha} -> {[parent for parent in commit.parent_shas]}')
+        #         f'p0 {commit.sha} -> {[parent for parent in commit.parent_shas]}')
+        #     print(
+        #         f'p1 {commit.sha} -> {[parent.sha for parent in commit.parents]}')
+        #     print(f'c0 {commit.sha} -> {[child for child in commit.child_shas]}')
+        #     print(
+        #         f'c1 {commit.sha} -> {[child.sha for child in commit.children]}')
 
     def get_commit_from_sha(self, sha: str) -> Commit:
         return self._sha2commit[sha]
+
+    def get_time_from_sha(self, sha: str) -> datetime:
+        return self._sha2time[sha]
 
     @property
     def commits(self):
@@ -182,8 +216,7 @@ class GitLog:
     @classmethod
     def from_dir(_cls, dir: str):
         return GitLog(root=dir,
-                      commits=sorted(get_commit_list(get_full_log(root=dir)),
-                                     key=lambda commit: commit.creation_time))
+                      commits=get_commit_list(get_full_log(root=dir)))
 
     def get_churn(self):
         churn = defaultdict(list)
@@ -197,12 +230,6 @@ class GitLog:
                     (commit.creation_time, change.added_lines,
                      change.removed_lines))
         return churn
-
-    def _in_interval(self, begin: datetime, end: datetime):
-        def in_interval(commit):
-            return begin <= commit.creation_time <= end
-
-        return in_interval
 
     def get_churn_for(self, filename: str, begin: datetime, end: datetime):
         churn = []
@@ -218,7 +245,7 @@ class GitLog:
 
         BackwardTraversal(commits=self._commits,
                           op=op,
-                          valid_cond=self._in_interval(begin=begin, end=end))()
+                          valid_cond=in_interval(begin=begin, end=end))()
         return list(reversed(churn))
 
     def get_couplings(self, filename: str, begin: datetime, end: datetime):
@@ -256,7 +283,7 @@ class GitLog:
 
         BackwardTraversal(commits=self._commits,
                           op=op,
-                          valid_cond=self._in_interval(begin=begin, end=end))()
+                          valid_cond=in_interval(begin=begin, end=end))()
 
         couplings = {
             name: data['count']
@@ -309,7 +336,54 @@ class GitLog:
 
         # ForwardTraversal(commits=self._commits,
         #                  op=op,
-        #                  valid_cond=self._in_interval(begin, end))()
+        #                  valid_cond=in_interval(begin, end))()
+
+        for commit in self._commits:
+            if begin > commit.creation_time:
+                continue
+            if end < commit.creation_time:
+                break
+            op(commit)
+
+        return revisions
+
+    def get_revisions_only(self, begin: datetime, end: datetime):
+        revisions = defaultdict(
+            lambda: {
+                'revisions':
+                0,
+                'soc':
+                0,
+                'last_change':
+                datetime(year=2015, month=1, day=1, tzinfo=timezone.utc).
+                timestamp(),
+                'churn': []
+            })
+
+        def op(commit):
+            for change in commit.changes:
+                if change.old_filename:
+                    revisions[change.filename] = revisions[change.old_filename]
+                    revisions.pop(change.old_filename)
+                revisions[change.filename]['revisions'] += 1
+                revisions[change.filename][
+                    'last_change'] = commit.creation_time.timestamp()
+                revisions[change.filename]['churn'].append({
+                    'timestamp':
+                    revisions[change.filename]['last_change'],
+                    'added_lines':
+                    change.added_lines,
+                    'removed_lines':
+                    change.removed_lines
+                })
+            names_in_commit = [change.filename for change in commit.changes]
+            soc = len(names_in_commit) - 1
+            for name in names_in_commit:
+                revisions[name]['soc'] += soc
+
+        # ForwardTraversal(commits=self._commits,
+        #                  op=op,
+        #                  valid_cond=in_interval(begin, end))()
 
         for commit in self._commits:
             if begin > commit.creation_time:
@@ -375,7 +449,7 @@ class GitLog:
 
         # ForwardTraversal(commits=self._commits,
         #                  op=op,
-        #                  valid_cond=self._in_interval(begin, end))()
+        #                  valid_cond=in_interval(begin, end))()
 
         for commit in self._commits:
             if begin > commit.creation_time:
@@ -385,6 +459,9 @@ class GitLog:
             op(commit)
 
         return revisions
+
+    def get_files_in_repository(self):
+        return get_files_in_repository(root=self.root)
 
     def get_authors(self, filename: str, module_map=None):
         n_revs = 0
@@ -431,27 +508,41 @@ class GitLog:
                         filename = change.old_filename
                     return
 
+        # is_valid = in_interval(begin=begin, end=end)
+        # for commit in self.commits:
+        #     if is_valid(commit):
+        #         op(commit)
         BackwardTraversal(commits=self._commits,
                           op=op,
-                          valid_cond=self._in_interval(begin=begin, end=end))()
+                          valid_cond=in_interval(begin=begin, end=end))()
         return commits
 
     def get_commits(self, begin: datetime, end: datetime) -> List[Commit]:
-        commits = []
+        print(f'get commits in {begin} {end}')
+        commits = [
+            commit for commit in self.commits
+            if in_interval(begin, end)(commit)
+        ]
+        # commits = []
 
-        def op(commit):
-            commits.append(commit)
+        # def op(commit):
+        #     commits.append(commit)
 
-        BackwardTraversal(commits=self._commits,
-                          op=op,
-                          valid_cond=self._in_interval(begin=begin, end=end))()
+        # BackwardTraversal(commits=self._commits,
+        #                   op=op,
+        #                   valid_cond=in_interval(begin=begin, end=end))()
+        # print(f'found {len(commits)} commits')
         return list(reversed(commits))
+
+    def get_commits_after(self, sha: str):
+        commits = []
 
     def calculate_complexity_over_range(self, filename: str, begin: datetime,
                                         end: datetime):
         commits = self.get_commits_for_file(filename=filename,
                                             begin=begin,
                                             end=end)
+        print(f'trend commits')
         complexity_by_rev = []
         for commit, commit_filename in commits:
             historic_version = _run_cmd(
@@ -499,6 +590,7 @@ class GitLog:
 
     def add_proximity_analysis(self, begin: datetime, end: datetime, stats):
         proximities = self.get_proximities(begin=begin, end=end)
+        # print(f'PRXI {proximities}')
         for proximity in proximities:
             filename = proximity[0]
             if not filename in stats:
@@ -510,7 +602,9 @@ class GitLog:
 
     def read_proximities_from(self, begin: datetime, end: datetime):
         commits = self.get_commits(begin=begin, end=end)
+        print(f'commits {len(commits)}')
         proximities = defaultdict(list)
+        print(f'proximities {len(proximities)}')
         for idx in range(len(commits) - 1):
             current_commit = commits[idx]
             for change in current_commit.changes:
