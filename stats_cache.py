@@ -58,11 +58,18 @@ def load_commits():
         ]
 
         add_parents_and_children(commits)
+        print('files')
+        for commit in commits:
+            for change in commit.changes:
+                if change.filename == 'Spacy/Spaces/RealSpace.h':
+                    print(f'found {change.filename} {commit.sha}')
         return commits
 
 
 def store_stats(stats):
     with open('stats.json', 'w') as stats_file:
+        if "Spacy/Spaces/RealSpace.h" in stats:
+            print("store RealSpace.h")
         stats_file.write(json.dumps(stats))
 
 

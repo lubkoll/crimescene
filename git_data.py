@@ -10,6 +10,7 @@ class Change:
     filename: str = ''
     added_lines: int = 0
     removed_lines: int = 0
+    removed: bool = False
 
     def __str__(self) -> str:
         return f'Change(old_filename={self.old_filename}, filename={self.filename}, added_lines={self.added_lines}, removed_lines={self.removed_lines})'
@@ -101,10 +102,18 @@ def get_commit_list(git_log: str) -> Tuple[Commit]:
             current_commit = get_commit(line)
             continue
 
-        if current_commit:
+        if current_commit and re.match(r'[0-9]+.*', line):
             change = get_change(line)
             if change:
                 current_commit.changes.append(change)
+            continue
+        match = re.match(r'\s*(delete)\s+mode\s+\d{6}\s+(\S+.*)', line)
+        if match:
+            filename = match.group(2)
+            for change in current_commit.changes:
+                if change.filename == filename:
+                    change.removed = True
+                    break
 
     if current_commit:
         commits.append(current_commit)

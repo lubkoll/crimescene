@@ -5,7 +5,7 @@ import os
 from update_stats import compute_new_stats, compute_stats
 from git_data import get_commit_list
 import stats_cache
-from stats import get_loc_in_revision, get_complexity
+from stats import get_loc_in_revision, get_complexity, get_proximities_for_file
 
 CACHENAME = 'cache.json'
 COMMITSNAME = 'commits.json'
@@ -35,6 +35,7 @@ if __name__ == "__main__":
     print('get last sha')
     last_sha = stats.get('last_sha')
     last_sha = '9f7ebce4'
+
     print('get git log')
     git_log = get_log_after_revision(
         root=args.root, sha=last_sha) if last_sha else get_full_log(
@@ -52,10 +53,21 @@ if __name__ == "__main__":
     def _get_complexity(filename: str, sha: str):
         return get_complexity(root=args.root, filename=filename, sha=sha)
 
+    def _get_proximity(filename: str, sha: str, previous_sha):
+        if previous_sha is None:
+            return 0
+        return get_proximities_for_file(root=args.root,
+                                        filename=filename,
+                                        sha=sha,
+                                        previous_sha=previous_sha)
+
     print('compute cache update')
     new_stats = compute_stats(commits=new_commits,
                               get_loc=get_loc,
-                              get_complexity=_get_complexity)
+                              get_complexity=_get_complexity,
+                              get_proximity=_get_proximity)
+    if 'Spacy/Spaces/RealSpace.h' in new_stats:
+        print('FOUND2')
     for filename, data in new_stats.items():
         stats[filename].update(data)
     print('store cache update')

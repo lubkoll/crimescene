@@ -9,7 +9,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Dict, List, Set
 import miner.complexity_calculations as complexity_calculations
-from util import DATE_FORMAT
+from util import DATE_FORMAT, timer
 
 
 def sum_proximity_stats(all_proximities):
@@ -31,9 +31,10 @@ def _run_cmd(root, args):
 
 
 def get_full_log(root: str):
+    print('get full log')
     return _run_cmd(root, [
         'git', 'log', "--pretty=format:'[%h] [%p] %aN %cd %s'", '--date=iso',
-        '--numstat', '--topo-order'
+        '--numstat', '--topo-order', '--summary'
     ])
 
 
@@ -41,7 +42,7 @@ def get_log_after_revision(root: str, sha: str):
     return _run_cmd(root=root,
                     args=[
                         'git', 'log', "--pretty=format:'[%h] [%p] %aN %cd %s'",
-                        '--date=iso', '--numstat', '--topo-order',
+                        '--date=iso', '--numstat', '--topo-order', '--summary',
                         f'{sha}..HEAD'
                     ])
 
@@ -159,8 +160,7 @@ def _pdistance(positions):
 
 
 def calc_proximity(changes):
-    return dict([(name, _pdistance(change))
-                 for name, change in changes.items()])
+    return {name: _pdistance(change) for name, change in changes.items()}
 
 
 def in_interval(begin: datetime, end: datetime):
@@ -292,6 +292,7 @@ class GitLog:
         }
         return couplings, n_rev
 
+    @timer
     def get_revisions(self, begin: datetime, end: datetime):
         revisions = defaultdict(
             lambda: {
@@ -347,6 +348,7 @@ class GitLog:
 
         return revisions
 
+    @timer
     def get_revisions_only(self, begin: datetime, end: datetime):
         revisions = defaultdict(
             lambda: {
@@ -408,8 +410,7 @@ class GitLog:
                 'loc':
                 0,
                 'last_change':
-                datetime(year=2015, month=1, day=1, tzinfo=timezone.utc).
-                timestamp(),
+                datetime(year=2015, month=1, day=1, tzinfo=timezone.utc),
                 'churn': [],
                 'lines':
                 0,
@@ -420,6 +421,14 @@ class GitLog:
                 'complexity_sd':
                 0.0,
                 'complexity_max':
+                0.0,
+                'proximity':
+                0.0,
+                'mean_proximity':
+                0.0,
+                'proximity_sd':
+                0.0,
+                'proximity_max':
                 0.0
             })
 
@@ -430,8 +439,7 @@ class GitLog:
             }
             for module in modules_in_commit:
                 revisions[module]['revisions'] += 1
-                revisions[module][
-                    'last_change'] = commit.creation_time.timestamp()
+                revisions[module]['last_change'] = commit.creation_time
 
                 churn = {
                     'timestamp': commit.creation_time.timestamp(),
@@ -460,6 +468,7 @@ class GitLog:
 
         return revisions
 
+    @timer
     def get_files_in_repository(self):
         return get_files_in_repository(root=self.root)
 
@@ -519,10 +528,11 @@ class GitLog:
 
     def get_commits(self, begin: datetime, end: datetime) -> List[Commit]:
         print(f'get commits in {begin} {end}')
-        commits = [
-            commit for commit in self.commits
-            if in_interval(begin, end)(commit)
-        ]
+        return tuple(
+            reversed([
+                commit for commit in self.commits
+                if in_interval(begin, end)(commit)
+            ]))
         # commits = []
 
         # def op(commit):
@@ -532,7 +542,9 @@ class GitLog:
         #                   op=op,
         #                   valid_cond=in_interval(begin=begin, end=end))()
         # print(f'found {len(commits)} commits')
-        return list(reversed(commits))
+
+
+#        return list(reversed(commits))
 
     def get_commits_after(self, sha: str):
         commits = []
@@ -588,6 +600,7 @@ class GitLog:
         os.system(f'cd {self.root} && git checkout master')
         return stats
 
+    @timer
     def add_proximity_analysis(self, begin: datetime, end: datetime, stats):
         proximities = self.get_proximities(begin=begin, end=end)
         # print(f'PRXI {proximities}')
@@ -595,11 +608,18 @@ class GitLog:
             filename = proximity[0]
             if not filename in stats:
                 continue
-            stats[filename]['proximity'] = proximity[2]
-            stats[filename]['mean_proximity'] = proximity[3]
-            stats[filename]['proximity_sd'] = proximity[4]
-            stats[filename]['proximity_max'] = proximity[5]
+            stats[filename].update({
+                'proximity': proximity[2],
+                'mean_proximity': proximity[3],
+                'proximity_sd': proximity[4],
+                'proximity_max': proximity[5]
+            })
+            # stats[filename]['proximity'] = proximity[2]
+            # stats[filename]['mean_proximity'] = proximity[3]
+            # stats[filename]['proximity_sd'] = proximity[4]
+            # stats[filename]['proximity_max'] = proximity[5]
 
+    @timer
     def read_proximities_from(self, begin: datetime, end: datetime):
         commits = self.get_commits(begin=begin, end=end)
         print(f'commits {len(commits)}')
@@ -621,6 +641,7 @@ class GitLog:
 
         return proximities
 
+    @timer
     def get_proximities(self, begin: datetime, end: datetime):
         proximities = self.read_proximities_from(begin=begin, end=end)
         stats = dict_as_stats(proximities)

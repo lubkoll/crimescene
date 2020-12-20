@@ -1,13 +1,12 @@
-from collections import defaultdict
-from dataclasses import dataclass
+from desc_stats import as_stats
 import json
 import re
+
 from stats_cache import load_commits, load_stats
 from get_wordcloud import get_new_workcloud_plot
-from git_log import GitLog, get_files_in_commit, get_first_commit_date
+from git_log import GitLog
 from file_analysis import FileAnalysis
-from get_db import SQL
-from util import ms_to_datetime, to_days, DATE_FORMAT
+from util import ms_to_datetime, timer, to_days
 import math
 import os
 import sys
@@ -24,7 +23,6 @@ from pathlib import Path
 import transform.csv_as_enclosure_json as csv_as_enclosure_json
 from circular_package import CircularPackage
 from color_map import get_colors
-from process_git_log import get_loc, add_loc, read_locs
 
 HOME = str(Path.home())
 CONTROL_WIDTH = 420
@@ -68,6 +66,7 @@ def get_age(stats, inverse=False):
     }
 
 
+@timer
 def add_stats_for_module(module_stats, file_stats, module_map):
     for filename, data in file_stats.items():
         module = module_map(filename)
@@ -75,11 +74,16 @@ def add_stats_for_module(module_stats, file_stats, module_map):
         module_stats[module]['lines'] += data['lines']
         module_stats[module]['complexity'] += data['complexity']
         module_stats[module]['complexity_max'] = max(
-            module_stats[module].get('complexity_max', 0), data['complexity'])
+            module_stats[module]['complexity_max'], data['complexity'])
+        module_stats[module]['proximity'] += data['proximity']
+        module_stats[module]['proximity_max'] = max(
+            module_stats[module]['proximity_max'], data['proximity'])
     for data in module_stats.values():
         data['mean_complexity'] = data['complexity'] / data['lines']
+        data['mean_proximity'] = data['proximity'] / data['revisions']
 
 
+@timer
 def get_current_stats(full_stats, git_log: GitLog, begin: datetime,
                       end: datetime):
     stats = git_log.get_revisions_only(begin=begin, end=end)
@@ -87,22 +91,40 @@ def get_current_stats(full_stats, git_log: GitLog, begin: datetime,
     to_remove = [key for key in stats if key not in files]
     for key in to_remove:
         del stats[key]
-    for filename, data in full_stats.items():
-        if filename not in stats or filename not in files:
+    for filename in files:
+        data = full_stats.get(filename)
+        if not data:
             continue
-        shas_with_time = [(sha, git_log.get_time_from_sha(sha))
-                          for sha in data.keys()]
-        shas_with_time = [(sha, t) for sha, t in shas_with_time if t <= end]
-        shas_with_time = list(
+        shas_with_time = tuple(
+            (sha, git_log.get_time_from_sha(sha)) for sha in data.keys())
+        shas_with_time = tuple(
+            (sha, t) for sha, t in shas_with_time if t <= end)
+        shas_with_time = tuple(
             sorted(shas_with_time, key=lambda x: x[1], reverse=True))
+        period_shas = tuple(sha for sha, t in shas_with_time if begin <= t)
         if not shas_with_time:
+            stats[filename].update({
+                'last_change': 0,
+                'loc': 0,
+                'lines': 0,
+                'complexity': 0,
+                'mean_complexity': 0,
+                'complexity_sd': 0,
+                'complexity_max': 0,
+                'proximity': 0,
+                'mean_proximity': 0,
+                'proximity_sd': 0,
+                'proximity_max': 0,
+                'authors': ({}, 0)
+            })
             continue
         last_sha, last_change_time = shas_with_time[0]
-        if full_stats[filename][last_sha]['lines'] == 0:
-            if filename in stats:
-                del stats[filename]
-            continue
 
+        proximity_stats = as_stats(
+            'proximity',
+            tuple(data['proximity']
+                  for sha, data in full_stats[filename].items()
+                  if sha in period_shas))
         stats[filename].update({
             'last_change':
             last_change_time,
@@ -119,19 +141,16 @@ def get_current_stats(full_stats, git_log: GitLog, begin: datetime,
             'complexity_max':
             full_stats[filename][last_sha]['complexity']['max'],
             'proximity':
-            0,
+            proximity_stats.total,
             'mean_proximity':
-            0,
+            proximity_stats.mean(),
             'proximity_sd':
-            0,
+            proximity_stats.sd(),
             'proximity_max':
-            0,
+            proximity_stats.max_value(),
             'authors':
             git_log.get_main_authors(filename=filename)
-            #            list(set(commit.author for commit in commits))
         })
-
-    git_log.add_proximity_analysis(begin=begin, end=end, stats=stats)
 
     return stats
 
@@ -150,17 +169,15 @@ class App:
         # self.db.add_project(project_name=self.__config['project'])
         # stats = self.db.read_stats(project_name=self.__config['project'])
         self.full_stats = load_stats()
-        self.stats = get_current_stats(full_stats=self.full_stats,
-                                       git_log=self.git_log,
-                                       begin=period_start,
-                                       end=today)
+        self.stats = {}
+        self.module_stats = {}
+        # self.stats = get_current_stats(full_stats=self.full_stats,
+        #                                git_log=self.git_log,
+        #                                begin=period_start,
+        #                                end=today)
         self.start_loc = 0
         self.summary = Div(text='', width=CONTROL_WIDTH, height=100)
 
-        # self.module_stats = self.git_log.get_revisions_for_module(
-        #     begin=period_start,
-        #     end=today,
-        #     module_map=get_module_map(self.__config))
         self.file_analysis = FileAnalysis(git_log=self.git_log,
                                           selected_file='',
                                           begin=period_start,
@@ -357,16 +374,6 @@ class App:
                                stats=self.get_stats(),
                                selected_callback=self.update_circ_selected)
 
-    def add_repo_main_authors(self, max_authors: int = 3):
-        for module, data in self.get_stats().items():
-            data['authors'] = self.git_log.get_main_authors(
-                filename=module, max_authors=max_authors)
-        # for module, data in self.module_stats.items():
-        #     data['authors'] = self.git_log.get_main_authors(
-        #         filename=module,
-        #         max_authors=max_authors,
-        #         module_map=get_module_map(self.__config))
-
     def date_slider_value(self):
         return ms_to_datetime(self.range_slider.value[1])
 
@@ -381,7 +388,6 @@ class App:
         ])
         authors = set(author for data in self.get_stats().values()
                       for author in data['authors'][0])
-        print(f'authors {list(authors)}')
         n_authors = len(authors)
         self.summary.text = f'Summary:</br>#files: {len(self.get_stats())}</br>#changed: {n_changed}</br>#authors: {n_authors}'
 
@@ -393,55 +399,14 @@ class App:
                                        end=period_end)
         t1 = time.time()
         print(f'time: {t1 - t0}')
+        self.module_stats = self.git_log.get_revisions_for_module(
+            begin=period_start,
+            end=period_end,
+            module_map=get_module_map(self.__config))
+        add_stats_for_module(module_stats=self.module_stats,
+                             file_stats=self.get_stats(),
+                             module_map=get_module_map(self.__config))
         self.update_summary()
-
-        # if self.range_slider.value in self.stats:
-        #     self.update_summary()
-        #     #            self.start_loc = get_lines_before(root=self.__config['path'], before=period_start)
-        #     self.start_loc = sum(
-        #         read_locs(
-        #             get_loc(
-        #                 root=self.__config['path'],
-        #                 before=period_start.strftime(DATE_FORMAT))).values())
-        #     return
-        # t1 = time.time()
-        # stats = self.git_log.get_revisions(begin=period_start, end=period_end)
-        # # self.module_stats = self.git_log.get_revisions_for_module(
-        # #     begin=period_start,
-        # #     end=period_end,
-        # #     module_map=get_module_map(self.__config))
-        # #        self.start_loc = get_lines_before(root=self.__config['path'], before=period_start)
-        # self.start_loc = sum(
-        #     read_locs(
-        #         get_loc(root=self.__config['path'],
-        #                 before=period_start.strftime(DATE_FORMAT))).values())
-        # print(f'START LOC {self.start_loc}')
-        # t2 = time.time()
-        # self.stats[self.range_slider.value] = stats
-        # t3 = time.time()
-        # locs = get_loc(root=self.__config['path'],
-        #                before=period_end.strftime(DATE_FORMAT))
-        # add_loc(self.get_stats(), locs)
-        # t4 = time.time()
-        # self.git_log.add_complexity_analysis(
-        #     end=period_end.strftime(DATE_FORMAT), stats=self.get_stats())
-        # t5 = time.time()
-        # self.git_log.add_proximity_analysis(begin=period_start,
-        #                                     end=period_end,
-        #                                     stats=self.get_stats())
-        # self.add_repo_main_authors()
-
-        # # add_stats_for_module(module_stats=self.module_stats,
-        # #                      file_stats=self.get_stats(),
-        # #                      module_map=get_module_map(self.__config))
-        # t6 = time.time()
-        # self.update_summary()
-        # t7 = time.time()
-        # print(f'{t2-t1}, {t3-t2}, {t4-t3}, {t5-t4}, {t6-t5}, {t7-t6}')
-        # self.db.store_stats(project_name=self.__config['project'],
-        #                     start=self.range_slider.value[0],
-        #                     end=self.range_slider.value[1],
-        #                     stats=stats)
 
     def update_wordcloud(self):
         wordcloud = get_new_workcloud_plot(git_log=self.git_log,
@@ -473,17 +438,17 @@ class App:
         else:
             self.update_source_for_file()
 
+    @timer
     def update_source_for_file(self):
         churn = [
             sum(churn['added_lines'] + churn['removed_lines']
                 for churn in data['churn'])
             for data in self.get_stats().values()
         ]
-        churn_per_line = [
-            sum(churn['added_lines'] + churn['removed_lines']
-                for churn in data['churn']) / data['lines']
-            for data in self.get_stats().values()
-        ]
+        churn_per_line = [(sum(churn['added_lines'] + churn['removed_lines']
+                               for churn in data['churn']) /
+                           data['lines']) if data['lines'] else 99999.9
+                          for data in self.get_stats().values()]
         color_data = []
         if self.color.value == 'churn':
             color_data = churn
@@ -496,6 +461,8 @@ class App:
 
         def get_author(author, ratio):
             return f'{author} ({round(ratio,2)})'
+
+        print(f'len {len(self.get_stats())}')
 
         self.source.data = dict(
             module=list(self.get_stats().keys()),
@@ -540,12 +507,6 @@ class App:
                     for author, ratio in self.git_log.get_main_authors(
                         filename=filename)[0].items())
                 for filename in self.get_stats()
-                # ', '.join(
-                #     get_author(author, ratio) for author, ratio in
-                #     self.get_stats()[name]['authors'][0].items())
-                # for name in self.get_stats()
-                #self.get_stats()[name]['authors'] for name in self.get_stats()
-                # 'me' for name in self.get_stats()
             ],
             n_authors=[
                 self.get_stats()[name]['authors'][1]
@@ -559,61 +520,70 @@ class App:
             churn=churn,
             churn_per_line=churn_per_line)
 
+    @timer
     def update_source_for_module(self):
-        pass
-        # stats = self.module_stats
-        # churn = [
-        #     sum(churn['added_lines'] + churn['removed_lines']
-        #         for churn in data['churn']) for data in stats.values()
-        # ]
-        # churn_per_line = [
-        #     sum(churn['added_lines'] + churn['removed_lines']
-        #         for churn in data['churn'])  # / data['lines']
-        #     for data in stats.values()
-        # ]
-        # color_data = []
-        # if self.color.value == 'churn':
-        #     color_data = churn
-        # elif self.color.value == 'churn/line':
-        #     color_data = churn_per_line
-        # else:
-        #     color_data = [data[self.color.value] for data in stats.values()]
+        stats = self.module_stats
+        churn = [
+            sum(churn['added_lines'] + churn['removed_lines']
+                for churn in data['churn']) for data in stats.values()
+        ]
+        for f, d in stats.items():
+            if d['lines'] == 0:
+                print(f'no lines in {f}')
+        churn_per_line = [
+            sum(churn['added_lines'] + churn['removed_lines']
+                for churn in data['churn']) / data['lines']
+            for data in stats.values()
+        ]
+        color_data = []
+        if self.color.value == 'churn':
+            color_data = churn
+        elif self.color.value == 'churn/line':
+            color_data = churn_per_line
+        else:
+            color_data = [data[self.color.value] for data in stats.values()]
 
-        # sizes = [
-        #     9 + 0.5 * math.sqrt(float(data['loc'])) for data in stats.values()
-        # ]
+        sizes = [
+            9 + 0.5 * math.sqrt(float(data['loc'])) for data in stats.values()
+        ]
 
-        # def get_author(author, ratio):
-        #     return f'{author} ({round(ratio,2)})'
+        def get_author(author, ratio):
+            return f'{author} ({round(ratio,2)})'
 
-        # self.source.data = dict(
-        #     module=list(stats.keys()),
-        #     loc=[data['loc'] for data in stats.values()],
-        #     revisions=[data['revisions'] for data in stats.values()],
-        #     size=sizes,
-        #     lines=[data['lines'] for data in stats.values()],
-        #     complexity=[data['complexity'] for data in stats.values()],
-        #     mean_complexity=[
-        #         data['mean_complexity'] for data in stats.values()
-        #     ],
-        #     complexity_sd=[data['complexity_sd'] for data in stats.values()],
-        #     complexity_max=[data['complexity_max'] for data in stats.values()],
-        #     soc=[data['soc'] for data in stats.values()],
-        #     color=get_colors(color_data),
-        #     authors=[
-        #         ', '.join(
-        #             get_author(author, ratio)
-        #             for author, ratio in data['authors'][0].items())
-        #         for data in stats.values()
-        #     ],
-        #     n_authors=[data['authors'][1] for data in stats.values()],
-        #     age=list(get_age(stats).values()),
-        #     churn_overview=[
-        #         f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
-        #         for data in stats.values()
-        #     ],
-        #     churn=churn,
-        #     churn_per_line=churn_per_line)
+        self.source.data = dict(
+            module=list(stats.keys()),
+            loc=[data['loc'] for data in stats.values()],
+            revisions=[data['revisions'] for data in stats.values()],
+            size=sizes,
+            lines=[data['lines'] for data in stats.values()],
+            complexity=[data['complexity'] for data in stats.values()],
+            mean_complexity=[
+                data['mean_complexity'] for data in stats.values()
+            ],
+            complexity_sd=[data['complexity_sd'] for data in stats.values()],
+            complexity_max=[data['complexity_max'] for data in stats.values()],
+            proximity=[data['proximity'] for data in stats.values()],
+            mean_proximity=[data['mean_proximity'] for data in stats.values()],
+            proximity_sd=[data['proximity_sd'] for data in stats.values()],
+            proximity_max=[data['proximity_max'] for data in stats.values()],
+            soc=[data['soc'] for data in stats.values()],
+            color=get_colors(color_data),
+            authors=[
+                '' for _ in stats
+                # ', '.join(
+                #     get_author(author, ratio)
+                #     for author, ratio in self.git_log.get_main_authors(
+                #         filename=filename)[0].items()) for filename in stats
+            ],
+            n_authors=['' for _ in stats],
+            # n_authors=[stats[filename]['authors'][1] for filename in stats],
+            age=list(get_age(stats).values()),
+            churn_overview=[
+                f"{sum(churn['added_lines'] + churn['removed_lines'] for churn in data['churn'])}:{sum(churn['added_lines'] for churn in data['churn'])}:{sum(churn['removed_lines'] for churn in data['churn'])}"
+                for data in stats.values()
+            ],
+            churn=churn,
+            churn_per_line=churn_per_line)
 
     def get_churn(self, t, key):
         return sum(churn[key] for data in self.get_stats().values()
@@ -627,6 +597,7 @@ class App:
         n_days = int(to_days(end_date - start_date))
         return [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
 
+    @timer
     def create_churn_plot(self):
         p = figure(title=self.long_term_plot_menu.value,
                    x_axis_label='date',
@@ -720,6 +691,7 @@ class App:
         p.legend.click_policy = "hide"
         return p
 
+    @timer
     def create_figure(self):
         self.update_source()
         x_title = self.x_menu.value

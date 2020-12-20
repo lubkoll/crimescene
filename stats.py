@@ -1,5 +1,5 @@
 from git_proximity_analysis import parse_changes_per_file_in
-from process_git_log import read_diff_for
+from process_git_log import read_diff_for, read_diff_for_file
 from desc_stats import as_stats
 from typing import Optional, Tuple
 from git_log import _run_cmd, calc_proximity
@@ -69,6 +69,15 @@ def compute_proximities(git_diff: str):
 def get_proximities(root: str, sha: str, previous_sha: str) -> dict:
     git_diff = read_diff_for(root, sha, previous_sha)
     return compute_proximities(git_diff)
+
+
+def get_proximities_for_file(root: str, filename: str, sha: str,
+                             previous_sha: str) -> dict:
+    git_diff = read_diff_for_file(root=root,
+                                  filename=filename,
+                                  rev1=sha,
+                                  rev2=previous_sha)
+    return compute_proximities(git_diff).get(filename, 0)
 
 
 def get_stats_for_file_in_commit(root: str,
