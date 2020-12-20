@@ -164,19 +164,10 @@ class App:
 
         today = datetime.now(tz=timezone.utc)
         period_start = today - timedelta(days=800)
-        #        self.git_log = GitLog.from_dir(self.__config['path'])
         self.selected = []
-        # self.db = SQL()
-        # self.db.add_project(project_name=self.__config['project'])
-        # stats = self.db.read_stats(project_name=self.__config['project'])
         self.full_stats = load_stats()
         self.stats = {}
         self.module_stats = {}
-        # self.stats = get_current_stats(full_stats=self.full_stats,
-        #                                git_log=self.git_log,
-        #                                begin=period_start,
-        #                                end=today)
-        self.start_loc = 0
         self.summary = Div(text='', width=CONTROL_WIDTH, height=100)
 
         self.file_analysis = FileAnalysis(git_log=self.git_log,
@@ -253,9 +244,9 @@ class App:
         self.layout = column(
             row(self.range_slider, self.range_button),
             row(
-                controls,
-                column(self.create_figure(), self.circular_package.plot,
-                       self.long_term_plot.layout)),
+                controls, self.create_figure()),
+            row(self.circular_package.plot,
+                       self.long_term_plot.layout)
         )
         self.update_wordcloud()
         self.update_summary()
@@ -420,9 +411,8 @@ class App:
         self.update_source()
         self.update_wordcloud()
         self.circular_package = self.get_circular_package()
-        self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-        self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-            1] = self.circular_package.plot
+        self.layout.children[1].children[1] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+        self.layout.children[2].children[0] = self.circular_package.plot  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
     def update_source(self):
         if self.level_menu.value == 'module':
@@ -628,7 +618,7 @@ class App:
         return self.source.data['module'][self.selected[0]]
 
     def update_table(self, attr, old, new):
-        self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
+        self.layout.children[1].children[1] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
 
     def update_circ_selected(self):
         if not self.circular_package.current_idx:
