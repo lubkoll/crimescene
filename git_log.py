@@ -554,7 +554,6 @@ class GitLog:
         commits = self.get_commits_for_file(filename=filename,
                                             begin=begin,
                                             end=end)
-        print(f'trend commits')
         complexity_by_rev = []
         for commit, commit_filename in commits:
             historic_version = _run_cmd(

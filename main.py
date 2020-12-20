@@ -1,3 +1,4 @@
+from long_term_plot import LongTermPlot
 from desc_stats import as_stats
 import json
 import re
@@ -203,17 +204,6 @@ class App:
                                  options=LEVELS)
         self.level_menu.on_change('value', self.update_level)
 
-        self.long_term_plot_menu = Select(title='Long Term Plot',
-                                          value='churn',
-                                          options=['churn', 'rising hotspot'])
-        self.long_term_plot_menu.on_change('value', self.update_long_term_plot)
-        self.long_term_plot_criterion = Select(
-            title='Long Term Plot Criterion',
-            value=LONG_TERM_PLOT_CRITERIA[0],
-            options=LONG_TERM_PLOT_CRITERIA)
-        self.long_term_plot_criterion.on_change('value',
-                                                self.update_long_term_plot)
-
         self.circ_pack_color = Select(title='Overview Color',
                                       value=CIRC_PACK_CRITERIA[1],
                                       options=CIRC_PACK_CRITERIA)
@@ -237,6 +227,13 @@ class App:
         self.minus_button = Button(label='-', button_type='default', width=50)
         self.minus_button.on_click(self.decrease_dates)
 
+        self.long_term_plot = LongTermPlot(stats=self.stats,
+                                           git_log=self.git_log,
+                                           period_start=period_start,
+                                           period_end=today,
+                                           width=PLOT_WIDTH,
+                                           height=PLOT_HEIGHT)
+
         wordcloud = get_new_workcloud_plot(git_log=self.git_log,
                                            end=self.date_slider_value(),
                                            period=self.period_length(),
@@ -252,22 +249,16 @@ class App:
                           self.color,
                           self.circ_pack_color,
                           self.level_menu,
-                          self.long_term_plot_menu,
-                          self.long_term_plot_criterion,
                           width=CONTROL_WIDTH)
         self.layout = column(
             row(self.range_slider, self.range_button),
             row(
                 controls,
                 column(self.create_figure(), self.circular_package.plot,
-                       self.create_churn_plot())),
+                       self.long_term_plot.layout)),
         )
         self.update_wordcloud()
         self.update_summary()
-
-    def update_long_term_plot(self, attr, old, new):
-        self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-            2] = self.create_churn_plot()
 
     def increase_dates(self):
         start, end = self.range_slider.value
@@ -407,6 +398,9 @@ class App:
                              file_stats=self.get_stats(),
                              module_map=get_module_map(self.__config))
         self.update_summary()
+        self.long_term_plot.update(stats=self.get_stats(),
+                                   period_start=period_start,
+                                   period_end=period_end)
 
     def update_wordcloud(self):
         wordcloud = get_new_workcloud_plot(git_log=self.git_log,
@@ -429,8 +423,6 @@ class App:
         self.layout.children[1].children[1].children[0] = self.create_figure()  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
         self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
             1] = self.circular_package.plot
-        self.layout.children[1].children[1].children[  # pylint: disable=unsupported-assignment-operation,unsubscriptable-object
-            2] = self.create_churn_plot()
 
     def update_source(self):
         if self.level_menu.value == 'module':
@@ -584,112 +576,6 @@ class App:
             ],
             churn=churn,
             churn_per_line=churn_per_line)
-
-    def get_churn(self, t, key):
-        return sum(churn[key] for data in self.get_stats().values()
-                   for churn in data['churn']
-                   if t == datetime.fromtimestamp(churn['timestamp'],
-                                                  tz=timezone.utc).date())
-
-    def get_time_axis(self):
-        start_date = ms_to_datetime(self.range_slider.value[0])
-        end_date = self.date_slider_value()
-        n_days = int(to_days(end_date - start_date))
-        return [start_date + timedelta(days=t) for t in range(1, n_days + 1)]
-
-    @timer
-    def create_churn_plot(self):
-        p = figure(title=self.long_term_plot_menu.value,
-                   x_axis_label='date',
-                   y_axis_label='loc' if self.long_term_plot_menu.value
-                   == 'churn' else 'mean complexity',
-                   x_axis_type='datetime',
-                   plot_width=PLOT_WIDTH,
-                   plot_height=PLOT_HEIGHT,
-                   tools='pan,xwheel_zoom,reset')
-        x = []
-        if self.long_term_plot_menu.value == 'churn':
-            x = self.get_time_axis()
-            added = [self.get_churn(t.date(), key='added_lines') for t in x]
-            removed = [
-                self.get_churn(t.date(), key='removed_lines') for t in x
-            ]
-            locs = [self.start_loc]
-            for idx in range(len(x) - 1):
-                locs.append(locs[idx] + added[idx] - removed[idx])
-            p.line(x=x, y=added, color='orange', legend_label='added')
-            p.line(x=x, y=removed, color='blue', legend_label='removed')
-            p.line(x=x, y=locs, color='gray', legend_label='lines of code')
-        if self.long_term_plot_menu.value == 'rising hotspot':
-            period_start, period_end = self.get_period_as_datetime()
-            complexity_trends = {
-                filename: self.git_log.compute_complexity_trend(
-                    filename=filename,
-                    begin=
-                    period_start,  #get_first_commit_date(root=self.__config['path']),
-                    end=period_end)
-                for filename in self.get_stats()
-            }
-            initial_complexities = []
-            final_complexities = []
-            stats_idx = 2
-            if self.long_term_plot_criterion.value == 'mean complexity':
-                stats_idx = 3
-            if self.long_term_plot_criterion.value == 'complexity sd':
-                stats_idx = 4
-            if self.long_term_plot_criterion.value == 'lines':
-                stats_idx = 1
-            for filename, data in complexity_trends.items():
-                if data:
-                    initial_complexities.append((filename, data[0][stats_idx]))
-                    final_complexities.append((filename, data[-1][stats_idx]))
-
-            initial_complexities.sort(key=lambda x: x[1], reverse=True)
-            final_complexities.sort(key=lambda x: x[1], reverse=True)
-            c0 = {
-                filename: idx
-                for idx, (filename, _) in enumerate(initial_complexities)
-            }
-            c1 = {
-                filename: idx
-                for idx, (filename, _) in enumerate(final_complexities)
-            }
-            rank_changes = [(filename, c0[filename] - c1[filename])
-                            for filename in c0]
-
-            rank_changes.sort(key=lambda x: x[1], reverse=True)
-            rank_changes = rank_changes[:10]
-            color_data = get_colors([rank for _, rank in rank_changes])
-            x = list(
-                set(
-                    self.git_log.get_commit_from_sha(row[0]).creation_time
-                    for filename, _ in rank_changes
-                    for row in complexity_trends[filename]))
-            x.sort()
-            for (filename, rank_change), color in zip(rank_changes,
-                                                      color_data):
-                trend = complexity_trends[filename]
-                previous = 0
-
-                def get_value(t):
-                    nonlocal previous
-                    for row in trend:
-                        if self.git_log.get_commit_from_sha(
-                                row[0]).creation_time == t:
-                            previous = row[stats_idx]
-                            return row[stats_idx]
-                    return previous
-
-                y = [get_value(t) for t in x]
-
-                p.line(x=x,
-                       y=y,
-                       color=color,
-                       legend_label=filename + ' ' + str(rank_change))
-
-        p.legend.location = "top_left"
-        p.legend.click_policy = "hide"
-        return p
 
     @timer
     def create_figure(self):
