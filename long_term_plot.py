@@ -64,7 +64,7 @@ class LongTermPlot:
         p = figure(title=self.long_term_plot_menu.value,
                    x_axis_label='date',
                    y_axis_label='loc' if self.long_term_plot_menu.value
-                   == 'churn' else 'mean complexity',
+                   == 'churn' else self.long_term_plot_criterion.value,
                    x_axis_type='datetime',
                    plot_width=self._width,
                    plot_height=self._height,
